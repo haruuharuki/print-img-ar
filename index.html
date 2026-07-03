@@ -9,13 +9,18 @@
     <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
 
     <style>
-      html, body {
+      html,
+      body {
         margin: 0;
         width: 100%;
         height: 100%;
         overflow: hidden;
         font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        background: #111;
+        background: transparent;
+      }
+
+      .a-canvas {
+        background: transparent !important;
       }
 
       .overlay-ui {
@@ -67,7 +72,7 @@
     <a-scene
       mindar-image="imageTargetSrc: ./assets/targets.mind; autoStart: false; uiScanning: yes; uiLoading: yes; uiError: yes;"
       color-space="sRGB"
-      renderer="colorManagement: true, physicallyCorrectLights"
+      renderer="colorManagement: true; physicallyCorrectLights: true; alpha: true;"
       vr-mode-ui="enabled: false"
       device-orientation-permission-ui="enabled: false"
       embedded
