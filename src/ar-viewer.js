@@ -237,6 +237,7 @@
     const parts = [
       `imageTargetSrc: ${library.targetFile}`,
       "autoStart: false",
+      `maxTrack: ${targets.length}`,
       "uiScanning: yes",
       "uiLoading: yes",
       "uiError: yes"
