@@ -16,7 +16,7 @@
       width: 1.006,
       height: 1.455,
       position: "0 0 0.01",
-      rotation: "0 0 15.9"
+      rotation: "0 0 0"
     },
     ui: {
       initialText: "กดเริ่ม แล้วส่องกล้องไปที่รูปที่ปริ้นไว้ ✨",
