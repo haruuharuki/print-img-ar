@@ -1,23 +1,5 @@
 (function () {
   window.AR_VIEWER_CONFIG = {
-    target: {
-      src: "./assets/targets.mind",
-      index: 0,
-      aspectRatio: 1447 / 2048
-    },
-    video: {
-      src: "./assets/overlay-video.mp4",
-      autoplay: true,
-      loop: true,
-      muted: true,
-      playsInline: true
-    },
-    overlay: {
-      width: 1.006,
-      height: 1.455,
-      position: "0 0 0.01",
-      rotation: "0 0 0"
-    },
     tracking: {
       smoothing: {
         enabled: true,

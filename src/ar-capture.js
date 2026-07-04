@@ -40,6 +40,8 @@
     let previewName = "";
     let previewMimeType = "image/png";
     let recorderState = null;
+    let activeOverlayElement = overlayElement;
+    let activeOverlayVideo = overlayVideo;
 
     captureButton.addEventListener("click", async () => {
       if (isPreviewOpen) return;
@@ -60,7 +62,7 @@
 
       captureButton.disabled = true;
       try {
-        const blob = await capturePhoto({ scene, overlayElement, overlayVideo });
+        const blob = await capturePhoto({ scene, overlayElement: activeOverlayElement, overlayVideo: activeOverlayVideo });
         showPreview({ blob, mimeType: "image/png", fileName: mediaFileName("photo", "png") });
         statusBox.textContent = "ถ่ายภาพแล้ว เลือก Share หรือ Download ได้เลย";
       } catch (error) {
@@ -120,6 +122,11 @@
       updateControls();
     }
 
+    function setActiveOverlay(nextOverlay) {
+      activeOverlayElement = nextOverlay.overlayElement;
+      activeOverlayVideo = nextOverlay.overlayVideo;
+    }
+
     function setMode(nextMode) {
       if (recorderState || isPreviewOpen || mode === nextMode) return;
       mode = nextMode;
@@ -138,7 +145,7 @@
 
       captureButton.disabled = true;
       try {
-        const compositor = createCompositor({ scene, overlayElement, overlayVideo, maxEdge: VIDEO_MAX_EDGE });
+        const compositor = createCompositor({ scene, overlayElement: activeOverlayElement, overlayVideo: activeOverlayVideo, maxEdge: VIDEO_MAX_EDGE });
         compositor.drawFrame();
 
         const stream = compositor.canvas.captureStream(RECORDING_FPS);
@@ -290,7 +297,8 @@
 
     return {
       setStarted,
-      setTargetVisible
+      setTargetVisible,
+      setActiveOverlay
     };
 
     function setPreviewHelp(message) {

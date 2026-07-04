@@ -1,19 +1,23 @@
 (function () {
   const config = window.AR_VIEWER_CONFIG;
+  const library = window.AR_LIBRARY;
   const scene = document.querySelector("a-scene");
+  const assetsRoot = document.querySelector("#arAssets");
+  const targetRoot = document.querySelector("#targetRoot");
   const startButton = document.querySelector("#startButton");
   const cameraSwitchButton = document.querySelector("#cameraSwitchButton");
   const statusBox = document.querySelector("#status");
-  const target = document.querySelector("#imageTarget");
-  const video = document.querySelector("#arVideo");
-  const overlay = target.querySelector("a-video");
+  const targets = getEnabledTargets(library);
+  const targetStates = targets.map(createTargetState);
+  const visibleTargetIds = new Set();
+  let activeTargetState = targetStates[0] || null;
   const capture =
     window.ARCapture &&
     window.ARCapture.init({
       scene,
       statusBox,
-      overlayElement: overlay,
-      overlayVideo: video
+      overlayElement: activeTargetState && activeTargetState.overlay,
+      overlayVideo: activeTargetState && activeTargetState.video
     });
 
   let hasStarted = false;
@@ -21,32 +25,21 @@
   let isSwitchingCamera = false;
   const restoreGetUserMedia = installFacingModeOverride(() => currentFacingMode);
 
-  scene.setAttribute("mindar-image", buildMindARAttribute(config));
-  target.setAttribute("mindar-image-target", `targetIndex: ${config.target.index}`);
+  if (!targets.length) {
+    statusBox.textContent = config.ui.errorText;
+    startButton.disabled = true;
+    return;
+  }
 
-  video.src = config.video.src;
-  video.loop = config.video.loop;
-  video.muted = config.video.muted;
-  video.playsInline = config.video.playsInline;
-  video.toggleAttribute("loop", config.video.loop);
-  video.toggleAttribute("muted", config.video.muted);
-  video.toggleAttribute("playsinline", config.video.playsInline);
-  video.toggleAttribute("webkit-playsinline", config.video.playsInline);
-
-  overlay.setAttribute("width", config.overlay.width);
-  overlay.setAttribute("height", config.overlay.height);
-  overlay.setAttribute("position", config.overlay.position);
-  overlay.setAttribute("rotation", config.overlay.rotation);
+  scene.setAttribute("mindar-image", buildMindARAttribute(config, library));
+  targetStates.forEach(({ entity }) => targetRoot.append(entity));
 
   statusBox.textContent = config.ui.initialText;
   startButton.textContent = config.ui.startButtonText;
 
   startButton.addEventListener("click", async () => {
     try {
-      // iOS/Safari often requires a user gesture before media playback.
-      await video.play();
-      video.pause();
-      video.currentTime = 0;
+      await unlockVideos(targetStates);
 
       const mindarSystem = scene.systems["mindar-image-system"];
       await mindarSystem.start();
@@ -71,10 +64,14 @@
 
     isSwitchingCamera = true;
     cameraSwitchButton.disabled = true;
+    visibleTargetIds.clear();
+    setActiveTarget(null);
+    targetStates.forEach(({ entity, video }) => {
+      entity.object3D.visible = false;
+      video.pause();
+    });
     capture && capture.setTargetVisible(false);
-    target.object3D.visible = false;
-    video.pause();
-    statusBox.textContent = nextFacingMode === "environment" ? "กำลังสลับไปกล้องหลัง..." : "กำลังสลับไปกล้องหน้า...";
+    statusBox.textContent = nextFacingMode === "environment" ? "เธเธณเธฅเธฑเธเธชเธฅเธฑเธเนเธเธเธฅเนเธญเธเธซเธฅเธฑเธ..." : "เธเธณเธฅเธฑเธเธชเธฅเธฑเธเนเธเธเธฅเนเธญเธเธซเธเนเธฒ...";
 
     try {
       await restartMindARWithFacingMode(nextFacingMode);
@@ -82,7 +79,7 @@
       statusBox.textContent = config.ui.scanningText;
     } catch (error) {
       console.error(error);
-      statusBox.textContent = "สลับกล้องไม่ได้ กำลังกลับไปกล้องเดิม";
+      statusBox.textContent = "เธชเธฅเธฑเธเธเธฅเนเธญเธเนเธกเนเนเธ”เน เธเธณเธฅเธฑเธเธเธฅเธฑเธเนเธเธเธฅเนเธญเธเน€เธ”เธดเธก";
       currentFacingMode = previousFacingMode;
 
       try {
@@ -90,7 +87,7 @@
         statusBox.textContent = config.ui.scanningText;
       } catch (fallbackError) {
         console.error(fallbackError);
-        statusBox.textContent = "กล้องเริ่มใหม่ไม่ได้ ลอง refresh หน้าเว็บ";
+        statusBox.textContent = "เธเธฅเนเธญเธเน€เธฃเธดเนเธกเนเธซเธกเนเนเธกเนเนเธ”เน เธฅเธญเธ refresh เธซเธเนเธฒเน€เธงเนเธ";
       }
     } finally {
       isSwitchingCamera = false;
@@ -98,26 +95,97 @@
     }
   });
 
-  target.addEventListener("targetFound", async () => {
-    statusBox.textContent = config.ui.foundText;
-    if (!hasStarted) return;
-    capture && capture.setTargetVisible(true);
-    if (config.video.autoplay) {
-      try {
-        await video.play();
-      } catch (error) {
-        console.warn("Video play was blocked", error);
+  targetStates.forEach((targetState) => {
+    targetState.entity.addEventListener("targetFound", async () => {
+      visibleTargetIds.add(targetState.target.id);
+      setActiveTarget(targetState);
+      statusBox.textContent = config.ui.foundText;
+      if (!hasStarted) return;
+      capture && capture.setTargetVisible(true);
+      if (targetState.videoConfig.autoplay) {
+        try {
+          await targetState.video.play();
+        } catch (error) {
+          console.warn("Video play was blocked", error);
+        }
       }
-    }
-  });
+    });
 
-  target.addEventListener("targetLost", () => {
-    statusBox.textContent = config.ui.lostText;
-    capture && capture.setTargetVisible(false);
-    video.pause();
+    targetState.entity.addEventListener("targetLost", () => {
+      visibleTargetIds.delete(targetState.target.id);
+      targetState.video.pause();
+      statusBox.textContent = config.ui.lostText;
+
+      if (!visibleTargetIds.size) {
+        setActiveTarget(null);
+        capture && capture.setTargetVisible(false);
+        return;
+      }
+
+      const nextTargetState = targetStates.find((state) => visibleTargetIds.has(state.target.id));
+      setActiveTarget(nextTargetState || null);
+      capture && capture.setTargetVisible(!!nextTargetState);
+    });
   });
 
   window.addEventListener("pagehide", restoreGetUserMedia);
+
+  function createTargetState(target) {
+    const safeId = safeDomId(target.id);
+    const videoId = `arVideo-${safeId}`;
+    const video = document.createElement("video");
+    const videoConfig = {
+      autoplay: target.video && target.video.autoplay !== undefined ? target.video.autoplay : true,
+      loop: target.video && target.video.loop !== undefined ? target.video.loop : true,
+      muted: target.video && target.video.muted !== undefined ? target.video.muted : true,
+      playsInline: target.video && target.video.playsInline !== undefined ? target.video.playsInline : true
+    };
+
+    video.id = videoId;
+    video.preload = "auto";
+    video.src = target.overlayPath;
+    video.loop = videoConfig.loop;
+    video.muted = videoConfig.muted;
+    video.playsInline = videoConfig.playsInline;
+    video.crossOrigin = "anonymous";
+    video.toggleAttribute("loop", videoConfig.loop);
+    video.toggleAttribute("muted", videoConfig.muted);
+    video.toggleAttribute("playsinline", videoConfig.playsInline);
+    video.toggleAttribute("webkit-playsinline", videoConfig.playsInline);
+    assetsRoot.append(video);
+
+    const entity = document.createElement("a-entity");
+    entity.id = `imageTarget-${safeId}`;
+    entity.setAttribute("mindar-image-target", `targetIndex: ${target.targetIndex}`);
+
+    const overlay = document.createElement("a-video");
+    overlay.setAttribute("src", `#${videoId}`);
+    overlay.setAttribute("width", target.overlay.width);
+    overlay.setAttribute("height", target.overlay.height);
+    overlay.setAttribute("position", target.overlay.position);
+    overlay.setAttribute("rotation", target.overlay.rotation);
+    entity.append(overlay);
+
+    return { target, video, videoConfig, entity, overlay };
+  }
+
+  function setActiveTarget(targetState) {
+    activeTargetState = targetState;
+    if (capture && capture.setActiveOverlay && targetState) {
+      capture.setActiveOverlay({
+        overlayElement: targetState.overlay,
+        overlayVideo: targetState.video
+      });
+    }
+  }
+
+  async function unlockVideos(states) {
+    for (const { video } of states) {
+      await video.play();
+      video.pause();
+      video.currentTime = 0;
+    }
+  }
 
   async function restartMindARWithFacingMode(facingMode) {
     const mindarSystem = scene.systems["mindar-image-system"];
@@ -165,9 +233,9 @@
     };
   }
 
-  function buildMindARAttribute(config) {
+  function buildMindARAttribute(config, library) {
     const parts = [
-      `imageTargetSrc: ${config.target.src}`,
+      `imageTargetSrc: ${library.targetFile}`,
       "autoStart: false",
       "uiScanning: yes",
       "uiLoading: yes",
@@ -183,5 +251,17 @@
     }
 
     return `${parts.join("; ")};`;
+  }
+
+  function getEnabledTargets(library) {
+    if (!library || !Array.isArray(library.targets)) return [];
+    return library.targets
+      .filter((target) => target.enabled)
+      .slice(0, library.maxActiveTargets || 10)
+      .sort((a, b) => Number(a.targetIndex) - Number(b.targetIndex));
+  }
+
+  function safeDomId(value) {
+    return String(value).replace(/[^a-zA-Z0-9_-]/g, "-");
   }
 })();

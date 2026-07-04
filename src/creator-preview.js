@@ -1,10 +1,14 @@
 (function () {
   const config = window.AR_VIEWER_CONFIG;
+  const library = window.AR_LIBRARY;
+  const activeTarget = getCreatorTarget(library);
   const scene = document.querySelector("a-scene");
   const shell = document.querySelector("#creatorShell");
   const startButton = document.querySelector("#creatorStartButton");
   const statusBox = document.querySelector("#creatorStatus");
   const panelToggle = document.querySelector("#panelToggle");
+  const tabButtons = Array.from(document.querySelectorAll(".creator-tab"));
+  const tabPanels = Array.from(document.querySelectorAll(".creator-tab-panel"));
   const controlsRoot = document.querySelector("#overlayControls");
   const snippetBox = document.querySelector("#overlaySnippet");
   const deployConfigButton = document.querySelector("#deployConfigButton");
@@ -14,11 +18,11 @@
   const video = document.querySelector("#creatorArVideo");
   const overlay = target.querySelector("a-video");
 
-  const initialPosition = parseVector(config.overlay.position);
-  const initialRotation = parseVector(config.overlay.rotation);
+  const initialPosition = parseVector(activeTarget.overlay.position);
+  const initialRotation = parseVector(activeTarget.overlay.rotation);
   const baseOverlay = {
-    width: Number(config.overlay.width),
-    height: Number(config.overlay.height),
+    width: Number(activeTarget.overlay.width),
+    height: Number(activeTarget.overlay.height),
     position: {
       x: initialPosition[0],
       y: initialPosition[1],
@@ -52,18 +56,18 @@
 
   scene.setAttribute(
     "mindar-image",
-    `imageTargetSrc: ${config.target.src}; autoStart: false; uiScanning: yes; uiLoading: yes; uiError: yes;`
+    `imageTargetSrc: ${library.targetFile}; autoStart: false; uiScanning: yes; uiLoading: yes; uiError: yes;`
   );
-  target.setAttribute("mindar-image-target", `targetIndex: ${config.target.index}`);
+  target.setAttribute("mindar-image-target", `targetIndex: ${activeTarget.targetIndex}`);
 
-  video.src = config.video.src;
-  video.loop = config.video.loop;
-  video.muted = config.video.muted;
-  video.playsInline = config.video.playsInline;
-  video.toggleAttribute("loop", config.video.loop);
-  video.toggleAttribute("muted", config.video.muted);
-  video.toggleAttribute("playsinline", config.video.playsInline);
-  video.toggleAttribute("webkit-playsinline", config.video.playsInline);
+  video.src = activeTarget.overlayPath;
+  video.loop = activeTarget.video.loop;
+  video.muted = activeTarget.video.muted;
+  video.playsInline = activeTarget.video.playsInline;
+  video.toggleAttribute("loop", activeTarget.video.loop);
+  video.toggleAttribute("muted", activeTarget.video.muted);
+  video.toggleAttribute("playsinline", activeTarget.video.playsInline);
+  video.toggleAttribute("webkit-playsinline", activeTarget.video.playsInline);
 
   statusBox.textContent = config.ui.initialText;
   startButton.textContent = config.ui.startButtonText;
@@ -95,6 +99,10 @@
     panelToggle.setAttribute("aria-expanded", String(!isCollapsed));
   });
 
+  tabButtons.forEach((button) => {
+    button.addEventListener("click", () => setActiveTab(button.dataset.tab));
+  });
+
   deployConfigButton.addEventListener("click", deployOverlayConfig);
   saveConfigButton.addEventListener("click", saveOverlayToConfigFile);
 
@@ -110,7 +118,7 @@
 
   target.addEventListener("targetFound", async () => {
     statusBox.textContent = config.ui.foundText;
-    if (!hasStarted || !config.video.autoplay) return;
+    if (!hasStarted || !activeTarget.video.autoplay) return;
     try {
       await video.play();
     } catch (error) {
@@ -164,6 +172,19 @@
     row.append(range, number);
     group.append(label, row);
     controlsRoot.append(group);
+  }
+
+  function setActiveTab(tabName) {
+    tabButtons.forEach((button) => {
+      const isActive = button.dataset.tab === tabName;
+      button.classList.toggle("is-active", isActive);
+      button.setAttribute("aria-selected", String(isActive));
+    });
+
+    tabPanels.forEach((panel) => {
+      const isActive = panel.id === `${tabName}TabPanel`;
+      panel.classList.toggle("hidden", !isActive);
+    });
   }
 
   function applyOverlayState() {
@@ -332,5 +353,16 @@
     }
     const parts = path.split(".");
     state[parts[0]][parts[1]] = value;
+  }
+
+  function getCreatorTarget(library) {
+    if (!library || !Array.isArray(library.targets)) {
+      throw new Error("AR_LIBRARY is missing.");
+    }
+    const target = library.targets.find((item) => item.enabled);
+    if (!target) {
+      throw new Error("AR_LIBRARY has no enabled target.");
+    }
+    return target;
   }
 })();

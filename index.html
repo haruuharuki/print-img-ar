@@ -8,6 +8,7 @@
     <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
     <script src="./src/ar-config.js"></script>
+    <script src="./src/ar-library.js"></script>
 
     <style>
       html,
@@ -310,23 +311,11 @@
       device-orientation-permission-ui="enabled: false"
       embedded
     >
-      <a-assets>
-        <video
-          id="arVideo"
-          preload="auto"
-          playsinline
-          webkit-playsinline
-          crossorigin="anonymous"
-        ></video>
-      </a-assets>
+      <a-assets id="arAssets"></a-assets>
 
       <a-camera position="0 0 0" look-controls="enabled: false"></a-camera>
 
-      <a-entity id="imageTarget">
-        <a-video
-          src="#arVideo"
-        ></a-video>
-      </a-entity>
+      <a-entity id="targetRoot"></a-entity>
     </a-scene>
 
     <script src="./src/ar-capture.js"></script>
