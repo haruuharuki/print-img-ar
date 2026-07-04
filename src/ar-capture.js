@@ -1,5 +1,16 @@
 (function () {
   const MAX_CAPTURE_EDGE = 1920;
+  const VIDEO_MAX_EDGE = 1280;
+  const RECORDING_FPS = 24;
+  const MAX_RECORDING_MS = 15000;
+
+  const VIDEO_MIME_CANDIDATES = [
+    "video/mp4;codecs=h264",
+    "video/mp4",
+    "video/webm;codecs=vp9",
+    "video/webm;codecs=vp8",
+    "video/webm"
+  ];
 
   window.ARCapture = {
     init
@@ -7,68 +18,88 @@
 
   function init({ scene, statusBox, overlayElement, overlayVideo }) {
     const captureButton = document.querySelector("#captureButton");
+    const modeSwitch = document.querySelector("#cameraModeSwitch");
+    const photoModeButton = document.querySelector("#photoModeButton");
+    const videoModeButton = document.querySelector("#videoModeButton");
+    const timer = document.querySelector("#recordingTimer");
     const preview = document.querySelector("#capturePreview");
     const previewImage = document.querySelector("#captureImage");
+    const previewVideo = document.querySelector("#captureVideo");
     const previewHelp = document.querySelector("#captureHelp");
     const retakeButton = document.querySelector("#retakeCaptureButton");
     const shareButton = document.querySelector("#shareCaptureButton");
     const downloadButton = document.querySelector("#downloadCaptureButton");
     const closeButton = document.querySelector("#closeCaptureButton");
 
+    let mode = "photo";
     let hasStarted = false;
     let hasVisibleTarget = false;
-    let captureBlob = null;
-    let captureUrl = null;
     let isPreviewOpen = false;
-    let captureName = "";
+    let previewBlob = null;
+    let previewUrl = null;
+    let previewName = "";
+    let previewMimeType = "image/png";
+    let recorderState = null;
 
     captureButton.addEventListener("click", async () => {
       if (isPreviewOpen) return;
       if (!hasVisibleTarget) {
         statusBox.textContent = "ยังไม่เจอ AR overlay สำหรับถ่ายภาพ";
-        updateShutterState();
+        updateControls();
+        return;
+      }
+
+      if (mode === "video") {
+        if (recorderState) {
+          await stopVideoRecording();
+        } else {
+          await startVideoRecording();
+        }
         return;
       }
 
       captureButton.disabled = true;
       try {
-        const blob = await captureScene({ scene, overlayElement, overlayVideo });
-        showPreview(blob);
+        const blob = await capturePhoto({ scene, overlayElement, overlayVideo });
+        showPreview({ blob, mimeType: "image/png", fileName: mediaFileName("photo", "png") });
         statusBox.textContent = "ถ่ายภาพแล้ว เลือก Share หรือ Download ได้เลย";
       } catch (error) {
         console.error(error);
-        statusBox.textContent = friendlyCaptureError(error);
+        statusBox.textContent = friendlyCaptureError(error, "photo");
       } finally {
-        updateShutterState();
+        updateControls();
       }
     });
 
+    photoModeButton.addEventListener("click", () => setMode("photo"));
+    videoModeButton.addEventListener("click", () => setMode("video"));
+
     shareButton.addEventListener("click", async () => {
-      if (!captureBlob) return;
-      const file = new File([captureBlob], captureName || captureFileName(), { type: "image/png" });
+      if (!previewBlob) return;
+      const file = new File([previewBlob], previewName, { type: previewMimeType });
 
       if (navigator.canShare && navigator.canShare({ files: [file] }) && navigator.share) {
         try {
           await navigator.share({
             files: [file],
-            title: "AR capture"
+            title: previewMimeType.startsWith("video/") ? "AR video" : "AR photo"
           });
-          setPreviewHelp("แชร์แล้ว ถ้าต้องการเก็บในเครื่องให้เลือก Save Image ใน Share Sheet");
+          setPreviewHelp("แชร์แล้ว ถ้าต้องการเก็บในเครื่องให้เลือก Save จาก Share Sheet");
           return;
         } catch (error) {
           if (error.name === "AbortError") return;
           console.warn("Share failed, falling back to download", error);
-          setPreviewHelp("Share ไม่สำเร็จ เลยดาวน์โหลดรูปให้แทน");
+          setPreviewHelp("Share ไม่สำเร็จ เลยดาวน์โหลดไฟล์ให้แทน");
         }
       } else {
-        setPreviewHelp("เครื่องนี้ยังแชร์ไฟล์ตรง ๆ ไม่ได้ เลยดาวน์โหลดรูปให้แทน");
+        setPreviewHelp("เครื่องนี้ยังแชร์ไฟล์ตรง ๆ ไม่ได้ เลยดาวน์โหลดไฟล์ให้แทน");
       }
 
-      downloadBlob(captureBlob, captureName);
+      downloadBlob(previewBlob, previewName);
     });
 
     downloadButton.addEventListener("click", () => {
-      if (captureBlob) downloadBlob(captureBlob, captureName);
+      if (previewBlob) downloadBlob(previewBlob, previewName);
     });
 
     retakeButton.addEventListener("click", hidePreview);
@@ -77,44 +108,183 @@
     function setStarted(value) {
       hasStarted = value;
       captureButton.classList.toggle("hidden", !hasStarted);
-      updateShutterState();
+      modeSwitch.classList.toggle("hidden", !hasStarted);
+      updateControls();
     }
 
     function setTargetVisible(value) {
       hasVisibleTarget = value;
-      updateShutterState();
+      if (!value && recorderState) {
+        stopVideoRecording({ reason: "targetLost" });
+      }
+      updateControls();
     }
 
-    function updateShutterState() {
-      captureButton.disabled = isPreviewOpen || !hasStarted || !hasVisibleTarget;
+    function setMode(nextMode) {
+      if (recorderState || isPreviewOpen || mode === nextMode) return;
+      mode = nextMode;
+      photoModeButton.classList.toggle("is-active", mode === "photo");
+      videoModeButton.classList.toggle("is-active", mode === "video");
+      statusBox.textContent = mode === "photo" ? "โหมด Photo พร้อมถ่าย" : "โหมด Video จำกัด 15 วินาที";
+      updateControls();
     }
 
-    function showPreview(blob) {
-      revokeCaptureUrl();
-      captureBlob = blob;
-      captureName = captureFileName();
-      captureUrl = URL.createObjectURL(blob);
-      previewImage.src = captureUrl;
+    async function startVideoRecording() {
+      const mimeType = chooseVideoMimeType();
+      if (!mimeType) {
+        statusBox.textContent = "อัดวิดีโอไม่ได้: browser นี้ยังไม่รองรับ MediaRecorder video";
+        return;
+      }
+
+      captureButton.disabled = true;
+      try {
+        const compositor = createCompositor({ scene, overlayElement, overlayVideo, maxEdge: VIDEO_MAX_EDGE });
+        compositor.drawFrame();
+
+        const stream = compositor.canvas.captureStream(RECORDING_FPS);
+        const recorder = new MediaRecorder(stream, {
+          mimeType,
+          videoBitsPerSecond: 2500000
+        });
+        const chunks = [];
+
+        recorderState = {
+          recorder,
+          compositor,
+          chunks,
+          mimeType,
+          startedAt: Date.now(),
+          animationFrame: null,
+          timerInterval: null,
+          stopTimeout: null
+        };
+
+        recorder.addEventListener("dataavailable", (event) => {
+          if (event.data && event.data.size > 0) chunks.push(event.data);
+        });
+        recorder.addEventListener("stop", () => finishVideoRecording());
+        recorder.start(250);
+
+        runRecordingLoop();
+        recorderState.timerInterval = window.setInterval(updateTimer, 250);
+        recorderState.stopTimeout = window.setTimeout(() => stopVideoRecording({ reason: "limit" }), MAX_RECORDING_MS);
+        updateTimer();
+        timer.classList.remove("hidden");
+        captureButton.classList.add("is-recording");
+        statusBox.textContent = "กำลังอัดวิดีโอ...";
+      } catch (error) {
+        console.error(error);
+        cleanupRecorderState();
+        statusBox.textContent = friendlyCaptureError(error, "video");
+      } finally {
+        updateControls();
+      }
+    }
+
+    async function stopVideoRecording({ reason } = {}) {
+      if (!recorderState) return;
+      if (reason === "targetLost") {
+        statusBox.textContent = "target หลุด หยุดอัดวิดีโอแล้ว";
+      }
+      if (recorderState.recorder.state !== "inactive") {
+        recorderState.recorder.stop();
+      }
+    }
+
+    function finishVideoRecording() {
+      if (!recorderState) return;
+      const { chunks, mimeType } = recorderState;
+      cleanupRecorderState();
+
+      if (!chunks.length) {
+        statusBox.textContent = "อัดวิดีโอไม่ได้: ไม่มีข้อมูลวิดีโอ";
+        updateControls();
+        return;
+      }
+
+      const extension = mimeType.includes("mp4") ? "mp4" : "webm";
+      const blob = new Blob(chunks, { type: mimeType });
+      showPreview({
+        blob,
+        mimeType,
+        fileName: mediaFileName("video", extension)
+      });
+      statusBox.textContent = "อัดวิดีโอแล้ว เลือก Share หรือ Download ได้เลย";
+      updateControls();
+    }
+
+    function runRecordingLoop() {
+      if (!recorderState) return;
+      recorderState.compositor.drawFrame();
+      recorderState.animationFrame = window.requestAnimationFrame(runRecordingLoop);
+    }
+
+    function cleanupRecorderState() {
+      if (!recorderState) return;
+      window.cancelAnimationFrame(recorderState.animationFrame);
+      window.clearInterval(recorderState.timerInterval);
+      window.clearTimeout(recorderState.stopTimeout);
+      recorderState.compositor.dispose();
+      recorderState = null;
+      timer.classList.add("hidden");
+      timer.textContent = "00:00";
+      captureButton.classList.remove("is-recording");
+    }
+
+    function updateTimer() {
+      if (!recorderState) return;
+      const elapsedSeconds = Math.min(MAX_RECORDING_MS / 1000, Math.floor((Date.now() - recorderState.startedAt) / 1000));
+      timer.textContent = formatDuration(elapsedSeconds);
+    }
+
+    function updateControls() {
+      captureButton.disabled = isPreviewOpen || !hasStarted || !hasVisibleTarget || false;
+      photoModeButton.disabled = !!recorderState || isPreviewOpen;
+      videoModeButton.disabled = !!recorderState || isPreviewOpen;
+    }
+
+    function showPreview({ blob, mimeType, fileName }) {
+      revokePreviewUrl();
+      previewBlob = blob;
+      previewMimeType = mimeType;
+      previewName = fileName;
+      previewUrl = URL.createObjectURL(blob);
       isPreviewOpen = true;
+
+      if (mimeType.startsWith("video/")) {
+        previewImage.classList.add("hidden");
+        previewImage.removeAttribute("src");
+        previewVideo.src = previewUrl;
+        previewVideo.classList.remove("hidden");
+      } else {
+        previewVideo.classList.add("hidden");
+        previewVideo.removeAttribute("src");
+        previewImage.src = previewUrl;
+        previewImage.classList.remove("hidden");
+      }
+
       preview.classList.remove("hidden");
-      setPreviewHelp(defaultPreviewHelp(blob));
-      updateShutterState();
+      setPreviewHelp(defaultPreviewHelp(blob, mimeType, fileName));
+      updateControls();
     }
 
     function hidePreview() {
       preview.classList.add("hidden");
       previewImage.removeAttribute("src");
-      captureBlob = null;
-      captureName = "";
+      previewVideo.pause();
+      previewVideo.removeAttribute("src");
+      previewBlob = null;
+      previewMimeType = "image/png";
+      previewName = "";
       isPreviewOpen = false;
-      revokeCaptureUrl();
-      updateShutterState();
+      revokePreviewUrl();
+      updateControls();
     }
 
-    function revokeCaptureUrl() {
-      if (captureUrl) {
-        URL.revokeObjectURL(captureUrl);
-        captureUrl = null;
+    function revokePreviewUrl() {
+      if (previewUrl) {
+        URL.revokeObjectURL(previewUrl);
+        previewUrl = null;
       }
     }
 
@@ -127,17 +297,31 @@
       previewHelp.textContent = message;
     }
 
-    function defaultPreviewHelp(blob) {
-      const file = new File([blob], captureName || captureFileName(), { type: "image/png" });
+    function defaultPreviewHelp(blob, mimeType, fileName) {
+      const file = new File([blob], fileName, { type: mimeType });
       const canShareFiles = !!(navigator.canShare && navigator.share && navigator.canShare({ files: [file] }));
       if (canShareFiles) {
-        return "บนมือถือ กด Share แล้วเลือก Save Image ได้ หรือส่งต่อไปยังแอปอื่น";
+        return mimeType.startsWith("video/")
+          ? "บนมือถือ กด Share แล้วเลือก Save Video ได้ หรือส่งต่อไปยังแอปอื่น"
+          : "บนมือถือ กด Share แล้วเลือก Save Image ได้ หรือส่งต่อไปยังแอปอื่น";
       }
-      return "กด Download เพื่อบันทึกภาพ PNG";
+      return mimeType.startsWith("video/") ? "กด Download เพื่อบันทึกวิดีโอ" : "กด Download เพื่อบันทึกภาพ PNG";
     }
   }
 
-  async function captureScene({ scene, overlayElement, overlayVideo }) {
+  async function capturePhoto({ scene, overlayElement, overlayVideo }) {
+    const compositor = createCompositor({ scene, overlayElement, overlayVideo, maxEdge: MAX_CAPTURE_EDGE });
+    try {
+      compositor.drawFrame();
+      const blob = await canvasToBlob(compositor.canvas, "image/png");
+      if (!blob) throw new Error("browser ไม่สามารถสร้าง PNG ได้");
+      return blob;
+    } finally {
+      compositor.dispose();
+    }
+  }
+
+  function createCompositor({ scene, overlayElement, overlayVideo, maxEdge }) {
     const mindarSystem = scene.systems["mindar-image-system"];
     const cameraVideo = mindarSystem && mindarSystem.video;
     const arCanvas = scene.renderer && scene.renderer.domElement;
@@ -155,51 +339,46 @@
       throw new Error("ขนาดหน้าจอไม่พร้อม");
     }
 
-    const scale = captureScale(containerRect);
-    const outputCanvas = document.createElement("canvas");
-    outputCanvas.width = Math.max(1, Math.round(containerRect.width * scale));
-    outputCanvas.height = Math.max(1, Math.round(containerRect.height * scale));
+    const scale = captureScale(containerRect, maxEdge);
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(containerRect.width * scale));
+    canvas.height = Math.max(1, Math.round(containerRect.height * scale));
 
-    const context = outputCanvas.getContext("2d", { alpha: false });
-    context.fillStyle = "#000000";
-    context.fillRect(0, 0, outputCanvas.width, outputCanvas.height);
+    const context = canvas.getContext("2d", { alpha: false });
 
-    drawElementCoveringContainer({
-      context,
-      element: cameraVideo,
-      containerRect,
-      scale
-    });
+    return {
+      canvas,
+      drawFrame() {
+        context.fillStyle = "#000000";
+        context.fillRect(0, 0, canvas.width, canvas.height);
 
-    drawElementCoveringContainer({
-      context,
-      element: arCanvas,
-      containerRect,
-      scale
-    });
+        drawElementCoveringContainer({ context, element: cameraVideo, containerRect, scale });
+        drawElementCoveringContainer({ context, element: arCanvas, containerRect, scale });
 
-    if (!canvasHasVisiblePixels(arCanvas)) {
-      drawProjectedOverlayVideo({
-        context,
-        scene,
-        overlayElement,
-        overlayVideo,
-        containerRect,
-        scale
-      });
-    }
-
-    const blob = await canvasToPngBlob(outputCanvas);
-    if (!blob) {
-      throw new Error("browser ไม่สามารถสร้าง PNG ได้");
-    }
-    return blob;
+        if (!canvasHasVisiblePixels(arCanvas)) {
+          drawProjectedOverlayVideo({
+            context,
+            scene,
+            overlayElement,
+            overlayVideo,
+            containerRect,
+            scale
+          });
+        }
+      },
+      dispose() {}
+    };
   }
 
-  function captureScale(containerRect) {
+  function chooseVideoMimeType() {
+    if (!window.MediaRecorder || !MediaRecorder.isTypeSupported) return "";
+    return VIDEO_MIME_CANDIDATES.find((type) => MediaRecorder.isTypeSupported(type)) || "";
+  }
+
+  function captureScale(containerRect, maxEdge) {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const longestEdge = Math.max(containerRect.width, containerRect.height);
-    return Math.min(dpr, MAX_CAPTURE_EDGE / longestEdge);
+    return Math.min(dpr, maxEdge / longestEdge);
   }
 
   function drawElementCoveringContainer({ context, element, containerRect, scale }) {
@@ -288,30 +467,30 @@
     };
   }
 
-  function canvasToPngBlob(canvas) {
+  function canvasToBlob(canvas, mimeType) {
     if (canvas.toBlob) {
-      return new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+      return new Promise((resolve) => canvas.toBlob(resolve, mimeType));
     }
 
-    const dataUrl = canvas.toDataURL("image/png");
+    const dataUrl = canvas.toDataURL(mimeType);
     const binary = atob(dataUrl.split(",")[1]);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) {
       bytes[i] = binary.charCodeAt(i);
     }
-    return Promise.resolve(new Blob([bytes], { type: "image/png" }));
+    return Promise.resolve(new Blob([bytes], { type: mimeType }));
   }
 
   function downloadBlob(blob, fileName) {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = fileName || captureFileName();
+    link.download = fileName;
     link.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
-  function captureFileName() {
+  function mediaFileName(kind, extension) {
     const now = new Date();
     const stamp = [
       now.getFullYear(),
@@ -322,15 +501,20 @@
       pad2(now.getMinutes()),
       pad2(now.getSeconds())
     ].join("");
-    return `ar-photo-${stamp}.png`;
+    return `ar-${kind}-${stamp}.${extension}`;
+  }
+
+  function formatDuration(seconds) {
+    return `00:${pad2(seconds)}`;
   }
 
   function pad2(value) {
     return String(value).padStart(2, "0");
   }
 
-  function friendlyCaptureError(error) {
+  function friendlyCaptureError(error, mode) {
     const message = error && error.message ? error.message : "ไม่ทราบสาเหตุ";
-    return `ถ่ายภาพไม่ได้: ${message} ลองขยับกล้องให้เห็น target ชัด ๆ แล้วถ่ายใหม่`;
+    const action = mode === "video" ? "อัดวิดีโอ" : "ถ่ายภาพ";
+    return `${action}ไม่ได้: ${message} ลองขยับกล้องให้เห็น target ชัด ๆ แล้วลองใหม่`;
   }
 })();

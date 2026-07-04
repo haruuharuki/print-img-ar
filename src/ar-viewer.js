@@ -21,10 +21,7 @@
   let isSwitchingCamera = false;
   const restoreGetUserMedia = installFacingModeOverride(() => currentFacingMode);
 
-  scene.setAttribute(
-    "mindar-image",
-    `imageTargetSrc: ${config.target.src}; autoStart: false; uiScanning: yes; uiLoading: yes; uiError: yes;`
-  );
+  scene.setAttribute("mindar-image", buildMindARAttribute(config));
   target.setAttribute("mindar-image-target", `targetIndex: ${config.target.index}`);
 
   video.src = config.video.src;
@@ -166,5 +163,25 @@
           ? { ...constraints.video }
           : constraints.video
     };
+  }
+
+  function buildMindARAttribute(config) {
+    const parts = [
+      `imageTargetSrc: ${config.target.src}`,
+      "autoStart: false",
+      "uiScanning: yes",
+      "uiLoading: yes",
+      "uiError: yes"
+    ];
+
+    const smoothing = config.tracking && config.tracking.smoothing;
+    if (smoothing && smoothing.enabled) {
+      parts.push(`filterMinCF: ${smoothing.filterMinCF}`);
+      parts.push(`filterBeta: ${smoothing.filterBeta}`);
+      parts.push(`warmupTolerance: ${smoothing.warmupTolerance}`);
+      parts.push(`missTolerance: ${smoothing.missTolerance}`);
+    }
+
+    return `${parts.join("; ")};`;
   }
 })();

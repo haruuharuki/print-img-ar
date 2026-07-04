@@ -94,6 +94,78 @@
         opacity: 0.45;
       }
 
+      .camera-mode-switch {
+        position: fixed;
+        z-index: 25;
+        left: 50%;
+        bottom: max(158px, calc(144px + env(safe-area-inset-bottom)));
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 4px;
+        width: min(220px, calc(100vw - 32px));
+        padding: 4px;
+        border-radius: 999px;
+        background: rgba(0, 0, 0, 0.58);
+        transform: translateX(-50%);
+        backdrop-filter: blur(8px);
+        pointer-events: auto;
+      }
+
+      .mode-button {
+        min-height: 34px;
+        padding: 0 12px;
+        border-radius: 999px;
+        background: transparent;
+        color: #ffffff;
+        font-size: 13px;
+      }
+
+      .mode-button.is-active {
+        background: #ffffff;
+        color: #111111;
+      }
+
+      .recording-timer {
+        position: fixed;
+        z-index: 25;
+        top: max(14px, env(safe-area-inset-top));
+        left: 50%;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        min-width: 78px;
+        padding: 8px 10px;
+        border-radius: 999px;
+        background: rgba(0, 0, 0, 0.68);
+        color: #ffffff;
+        font-size: 14px;
+        font-weight: 700;
+        transform: translateX(-50%);
+        backdrop-filter: blur(8px);
+      }
+
+      .recording-timer.hidden {
+        display: none;
+      }
+
+      .recording-timer::before {
+        content: "";
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: #ff3b30;
+      }
+
+      .capture-button.is-recording {
+        border-color: rgba(255, 59, 48, 0.92);
+      }
+
+      .capture-button.is-recording::after {
+        inset: 17px;
+        border-radius: 8px;
+        background: #ff3b30;
+      }
+
       .camera-switch-button {
         position: fixed;
         z-index: 25;
@@ -142,6 +214,15 @@
         background: #111111;
       }
 
+      .capture-preview video {
+        align-self: center;
+        justify-self: center;
+        max-width: 100%;
+        max-height: 100%;
+        border-radius: 8px;
+        background: #111111;
+      }
+
       .capture-help {
         margin: 0;
         padding: 9px 11px;
@@ -170,6 +251,10 @@
           height: 62px;
         }
 
+        .camera-mode-switch {
+          bottom: max(158px, calc(142px + env(safe-area-inset-bottom)));
+        }
+
         .capture-actions {
           grid-template-columns: 1fr;
         }
@@ -191,6 +276,13 @@
       disabled
     ></button>
 
+    <div id="cameraModeSwitch" class="camera-mode-switch hidden" role="group" aria-label="Capture mode">
+      <button id="photoModeButton" class="mode-button is-active" type="button">Photo</button>
+      <button id="videoModeButton" class="mode-button" type="button">Video</button>
+    </div>
+
+    <div id="recordingTimer" class="recording-timer hidden">00:00</div>
+
     <button
       id="cameraSwitchButton"
       class="camera-switch-button hidden"
@@ -201,6 +293,7 @@
 
     <div id="capturePreview" class="capture-preview hidden" role="dialog" aria-modal="true">
       <img id="captureImage" alt="AR capture preview" />
+      <video id="captureVideo" class="hidden" controls playsinline></video>
       <p id="captureHelp" class="capture-help"></p>
       <div class="capture-actions">
         <button id="retakeCaptureButton" type="button">Retake</button>
