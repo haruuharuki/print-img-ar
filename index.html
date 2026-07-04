@@ -7,6 +7,7 @@
 
     <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
+    <script src="./src/ar-config.js"></script>
 
     <style>
       html,
@@ -65,12 +66,11 @@
 
   <body>
     <div class="overlay-ui">
-      <div id="status" class="panel">กดเริ่ม แล้วส่องกล้องไปที่รูปที่ปริ้นไว้ ✨</div>
-      <button id="startButton">เริ่ม AR</button>
+      <div id="status" class="panel"></div>
+      <button id="startButton"></button>
     </div>
 
     <a-scene
-      mindar-image="imageTargetSrc: ./assets/targets.mind; autoStart: false; uiScanning: yes; uiLoading: yes; uiError: yes;"
       color-space="sRGB"
       renderer="colorManagement: true; physicallyCorrectLights: true; alpha: true;"
       vr-mode-ui="enabled: false"
@@ -80,10 +80,7 @@
       <a-assets>
         <video
           id="arVideo"
-          src="./assets/overlay-video.mp4"
           preload="auto"
-          loop
-          muted
           playsinline
           webkit-playsinline
           crossorigin="anonymous"
@@ -92,60 +89,13 @@
 
       <a-camera position="0 0 0" look-controls="enabled: false"></a-camera>
 
-      <a-entity id="imageTarget" mindar-image-target="targetIndex: 0">
-        <!-- target-image.png ratio is about 1447:2048, so width/height ≈ 0.7065 -->
+      <a-entity id="imageTarget">
         <a-video
           src="#arVideo"
-          width="0.707"
-          height="1"
-          position="0 0 0.01"
-          rotation="0 0 0"
         ></a-video>
       </a-entity>
     </a-scene>
 
-    <script>
-      const scene = document.querySelector("a-scene");
-      const startButton = document.querySelector("#startButton");
-      const statusBox = document.querySelector("#status");
-      const target = document.querySelector("#imageTarget");
-      const video = document.querySelector("#arVideo");
-
-      let hasStarted = false;
-
-      startButton.addEventListener("click", async () => {
-        try {
-          // iOS/Safari often requires a user gesture before media playback.
-          await video.play();
-          video.pause();
-          video.currentTime = 0;
-
-          const mindarSystem = scene.systems["mindar-image-system"];
-          await mindarSystem.start();
-
-          hasStarted = true;
-          startButton.classList.add("hidden");
-          statusBox.textContent = "ส่องรูปเป้าหมายให้เต็มจอหน่อยนึงนะ";
-        } catch (error) {
-          console.error(error);
-          statusBox.textContent = "เริ่มไม่ได้: เช็กว่าเปิดผ่าน HTTPS/localhost และอนุญาตกล้องแล้ว";
-        }
-      });
-
-      target.addEventListener("targetFound", async () => {
-        statusBox.textContent = "เจอรูปแล้ว! วิดีโอกำลังเล่น ✨";
-        if (!hasStarted) return;
-        try {
-          await video.play();
-        } catch (error) {
-          console.warn("Video play was blocked", error);
-        }
-      });
-
-      target.addEventListener("targetLost", () => {
-        statusBox.textContent = "รูปหลุดจากกล้องแล้ว ลองขยับมือถือช้า ๆ";
-        video.pause();
-      });
-    </script>
+    <script src="./src/ar-viewer.js"></script>
   </body>
 </html>
