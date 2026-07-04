@@ -1,7 +1,8 @@
 (function () {
   const config = window.AR_VIEWER_CONFIG;
   const library = window.AR_LIBRARY;
-  const activeTarget = getCreatorTarget(library);
+  let enabledTargets = getEnabledTargets(library);
+  let activeTarget = enabledTargets[0];
   const scene = document.querySelector("a-scene");
   const shell = document.querySelector("#creatorShell");
   const startButton = document.querySelector("#creatorStartButton");
@@ -14,26 +15,30 @@
   const deployConfigButton = document.querySelector("#deployConfigButton");
   const saveConfigButton = document.querySelector("#saveConfigButton");
   const downloadButton = document.querySelector("#downloadSnippetButton");
-  const target = document.querySelector("#creatorImageTarget");
+  const targetSelect = document.querySelector("#overlayTargetSelect");
+  const libraryButton = document.querySelector("#libraryButton");
+  const libraryPanel = document.querySelector("#libraryPanel");
+  const libraryCloseButton = document.querySelector("#libraryCloseButton");
+  const libraryStatus = document.querySelector("#libraryStatus");
+  const libraryList = document.querySelector("#libraryList");
+  const libraryPreviewModal = document.querySelector("#libraryPreviewModal");
+  const libraryPreviewTitle = document.querySelector("#libraryPreviewTitle");
+  const libraryPreviewCloseButton = document.querySelector("#libraryPreviewCloseButton");
+  const libraryPreviewImage = document.querySelector("#libraryPreviewImage");
+  const libraryPreviewVideo = document.querySelector("#libraryPreviewVideo");
+  let target = document.querySelector("#creatorImageTarget");
   const video = document.querySelector("#creatorArVideo");
-  const overlay = target.querySelector("a-video");
+  let overlay = target.querySelector("a-video");
+  const controlInputs = new Map();
 
-  const initialPosition = parseVector(activeTarget.overlay.position);
-  const initialRotation = parseVector(activeTarget.overlay.rotation);
-  const baseOverlay = {
-    width: Number(activeTarget.overlay.width),
-    height: Number(activeTarget.overlay.height),
-    position: {
-      x: initialPosition[0],
-      y: initialPosition[1],
-      z: initialPosition[2]
-    },
-    rotation: {
-      x: initialRotation[0],
-      y: initialRotation[1],
-      z: initialRotation[2]
-    }
-  };
+  if (!activeTarget) {
+    statusBox.textContent = "AR_LIBRARY has no enabled targets.";
+    startButton.disabled = true;
+    return;
+  }
+
+  let baseOverlay = overlayStateFromTarget(activeTarget);
+  let baseUpdatedAt = activeTarget.updatedAt || "";
   const state = {
     width: baseOverlay.width,
     height: baseOverlay.height,
@@ -58,21 +63,14 @@
     "mindar-image",
     `imageTargetSrc: ${library.targetFile}; autoStart: false; uiScanning: yes; uiLoading: yes; uiError: yes;`
   );
-  target.setAttribute("mindar-image-target", `targetIndex: ${activeTarget.targetIndex}`);
-
-  video.src = activeTarget.overlayPath;
-  video.loop = activeTarget.video.loop;
-  video.muted = activeTarget.video.muted;
-  video.playsInline = activeTarget.video.playsInline;
-  video.toggleAttribute("loop", activeTarget.video.loop);
-  video.toggleAttribute("muted", activeTarget.video.muted);
-  video.toggleAttribute("playsinline", activeTarget.video.playsInline);
-  video.toggleAttribute("webkit-playsinline", activeTarget.video.playsInline);
 
   statusBox.textContent = config.ui.initialText;
   startButton.textContent = config.ui.startButtonText;
+  deployConfigButton.textContent = "Save & Deploy Library";
 
+  populateTargetSelect();
   controls.forEach(createControl);
+  applySelectedTarget(activeTarget.id, { showStatus: false });
   applyOverlayState();
 
   startButton.addEventListener("click", async () => {
@@ -104,7 +102,39 @@
   });
 
   deployConfigButton.addEventListener("click", deployOverlayConfig);
-  saveConfigButton.addEventListener("click", saveOverlayToConfigFile);
+  saveConfigButton.addEventListener("click", saveOverlayToLibrary);
+  targetSelect.addEventListener("change", () => {
+    applySelectedTarget(targetSelect.value, { showStatus: true });
+  });
+  libraryButton.addEventListener("click", openLibraryPanel);
+  libraryCloseButton.addEventListener("click", closeLibraryPanel);
+  libraryPreviewCloseButton.addEventListener("click", closeLibraryPreview);
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Tab") {
+      if (!libraryPreviewModal.classList.contains("hidden")) {
+        trapFocus(libraryPreviewModal, event);
+        return;
+      }
+      if (!libraryPanel.classList.contains("hidden")) {
+        trapFocus(libraryPanel, event);
+        return;
+      }
+    }
+    if (event.key !== "Escape") return;
+    if (!libraryPreviewModal.classList.contains("hidden")) {
+      closeLibraryPreview();
+      return;
+    }
+    if (!libraryPanel.classList.contains("hidden")) {
+      closeLibraryPanel();
+    }
+  });
+  window.addEventListener("ar-library-updated", () => {
+    refreshLibraryState();
+    if (!libraryPanel.classList.contains("hidden")) {
+      renderLibraryPanel();
+    }
+  });
 
   downloadButton.addEventListener("click", () => {
     const blob = new Blob([buildOverlaySnippet()], { type: "text/plain;charset=utf-8" });
@@ -116,20 +146,305 @@
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
   });
 
-  target.addEventListener("targetFound", async () => {
+  function openLibraryPanel() {
+    renderLibraryPanel();
+    libraryPanel.classList.remove("hidden");
+    libraryCloseButton.focus();
+  }
+
+  function closeLibraryPanel() {
+    closeLibraryPreview();
+    libraryPanel.classList.add("hidden");
+    libraryButton.focus();
+  }
+
+  function renderLibraryPanel() {
+    const targets = getLibraryTargets();
+    const enabledCount = targets.filter((item) => item.enabled).length;
+    const disabledCount = targets.length - enabledCount;
+    libraryStatus.textContent = `${targets.length} targets · ${enabledCount} enabled · ${disabledCount} disabled`;
+    libraryList.replaceChildren();
+
+    if (!targets.length) {
+      const empty = document.createElement("p");
+      empty.className = "library-empty";
+      empty.textContent = "No targets in this library yet.";
+      libraryList.append(empty);
+      return;
+    }
+
+    targets.forEach((targetConfig) => {
+      libraryList.append(createLibraryCard(targetConfig));
+    });
+  }
+
+  function createLibraryCard(targetConfig) {
+    const card = document.createElement("article");
+    card.className = "library-card";
+
+    const media = document.createElement("div");
+    media.className = "library-card-media";
+
+    const image = document.createElement("img");
+    image.src = targetConfig.imagePath;
+    image.alt = `${targetConfig.name} target`;
+    image.loading = "lazy";
+    image.addEventListener("error", () => {
+      image.removeAttribute("src");
+      image.alt = `${targetConfig.name} target thumbnail unavailable`;
+      image.style.background = "#dddddd";
+    });
+
+    const videoPreview = document.createElement("video");
+    videoPreview.src = targetConfig.overlayPath;
+    videoPreview.muted = true;
+    videoPreview.controls = true;
+    videoPreview.preload = "metadata";
+    videoPreview.playsInline = true;
+    videoPreview.addEventListener("play", () => pauseOtherLibraryVideos(videoPreview));
+
+    media.append(image, videoPreview);
+
+    const body = document.createElement("div");
+    body.className = "library-card-body";
+
+    const title = document.createElement("div");
+    title.className = "library-card-title";
+    const name = document.createElement("h3");
+    name.textContent = targetConfig.name;
+    const badge = document.createElement("span");
+    badge.className = targetConfig.enabled ? "library-badge" : "library-badge is-disabled";
+    badge.textContent = targetConfig.enabled ? "Enabled" : "Disabled";
+    title.append(name, badge);
+
+    const meta = document.createElement("div");
+    meta.className = "library-meta";
+    appendMeta(meta, "id", targetConfig.id);
+    appendMeta(meta, "targetIndex", targetConfig.targetIndex ?? "none");
+    appendMeta(meta, "target image", fileNameFromPath(targetConfig.imagePath));
+    appendMeta(meta, "overlay video", fileNameFromPath(targetConfig.overlayPath));
+    appendMeta(meta, "updatedAt", targetConfig.updatedAt || "none");
+
+    const actions = document.createElement("div");
+    actions.className = "library-card-actions";
+    actions.append(
+      createLibraryAction("Preview", () => openLibraryPreview(targetConfig)),
+      createLibraryAction("Edit", () => editProjectSetupTarget(targetConfig.id)),
+      createLibraryAction("Adjust", () => adjustOverlayTarget(targetConfig.id))
+    );
+
+    body.append(title, meta, actions);
+    card.append(media, body);
+    return card;
+  }
+
+  function appendMeta(root, label, value) {
+    const row = document.createElement("div");
+    row.textContent = `${label}: ${value}`;
+    root.append(row);
+  }
+
+  function createLibraryAction(label, handler) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.addEventListener("click", handler);
+    return button;
+  }
+
+  function openLibraryPreview(targetConfig) {
+    pauseOtherLibraryVideos(null);
+    libraryPreviewTitle.textContent = `${targetConfig.name} preview`;
+    libraryPreviewImage.src = targetConfig.imagePath;
+    libraryPreviewImage.alt = `${targetConfig.name} target preview`;
+    libraryPreviewVideo.pause();
+    libraryPreviewVideo.src = targetConfig.overlayPath;
+    libraryPreviewVideo.muted = true;
+    libraryPreviewVideo.load();
+    libraryPreviewModal.classList.remove("hidden");
+    libraryPreviewCloseButton.focus();
+  }
+
+  function closeLibraryPreview() {
+    libraryPreviewModal.classList.add("hidden");
+    libraryPreviewVideo.pause();
+    libraryPreviewVideo.removeAttribute("src");
+    libraryPreviewVideo.load();
+  }
+
+  function editProjectSetupTarget(targetId) {
+    closeLibraryPanel();
+    setActiveTab("setup");
+    if (window.CreatorProjectSetup && window.CreatorProjectSetup.editTarget) {
+      window.CreatorProjectSetup.editTarget(targetId);
+    }
+  }
+
+  function adjustOverlayTarget(targetId) {
+    const targetConfig = getLibraryTargets().find((item) => item.id === targetId);
+    if (targetConfig && !targetConfig.enabled) {
+      statusBox.textContent = `${targetConfig.name} is disabled. Enable it before adjusting overlay preview.`;
+      return;
+    }
+    closeLibraryPanel();
+    setActiveTab("adjust");
+    applySelectedTarget(targetId, { showStatus: true });
+  }
+
+  function pauseOtherLibraryVideos(currentVideo) {
+    libraryList.querySelectorAll("video").forEach((item) => {
+      if (item !== currentVideo) {
+        item.pause();
+      }
+    });
+    if (libraryPreviewVideo !== currentVideo) {
+      libraryPreviewVideo.pause();
+    }
+  }
+
+  function trapFocus(root, event) {
+    const focusable = Array.from(
+      root.querySelectorAll("button, [href], input, select, textarea, video, [tabindex]:not([tabindex='-1'])")
+    ).filter((item) => !item.disabled && item.offsetParent !== null);
+    if (!focusable.length) return;
+
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+      return;
+    }
+    if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  function refreshLibraryState() {
+    const currentTargetId = activeTarget && activeTarget.id;
+    enabledTargets = getEnabledTargets(window.AR_LIBRARY);
+    const refreshedTarget =
+      enabledTargets.find((item) => item.id === currentTargetId) ||
+      enabledTargets[0];
+    if (!refreshedTarget) return;
+    activeTarget = refreshedTarget;
+    populateTargetSelect();
+    targetSelect.value = activeTarget.id;
+    baseUpdatedAt = activeTarget.updatedAt || "";
+  }
+
+  async function handleTargetFound() {
     statusBox.textContent = config.ui.foundText;
-    if (!hasStarted || !activeTarget.video.autoplay) return;
+    const videoConfig = activeTarget.video || {};
+    if (!hasStarted || videoConfig.autoplay === false) return;
     try {
       await video.play();
     } catch (error) {
       console.warn("Video play was blocked", error);
     }
-  });
+  }
 
-  target.addEventListener("targetLost", () => {
+  function handleTargetLost() {
     statusBox.textContent = config.ui.lostText;
     video.pause();
-  });
+  }
+
+  function populateTargetSelect() {
+    targetSelect.replaceChildren();
+    enabledTargets.forEach((item) => {
+      const option = document.createElement("option");
+      option.value = item.id;
+      option.textContent = `${item.name} (${item.id})`;
+      targetSelect.append(option);
+    });
+    targetSelect.value = activeTarget.id;
+  }
+
+  async function applySelectedTarget(targetId, { showStatus }) {
+    const nextTarget = enabledTargets.find((item) => item.id === targetId);
+    if (!nextTarget) return;
+
+    const mindarSystem = scene.systems["mindar-image-system"];
+    const shouldRestartTracking = hasStarted && mindarSystem;
+    if (shouldRestartTracking) {
+      try {
+        mindarSystem.stop();
+      } catch (error) {
+        console.warn("MindAR stop before target switch failed", error);
+      }
+    }
+
+    activeTarget = nextTarget;
+    targetSelect.value = activeTarget.id;
+    video.pause();
+    video.currentTime = 0;
+    applyVideoConfig(activeTarget);
+    recreateTargetEntity(activeTarget);
+    loadOverlayState(activeTarget);
+
+    if (showStatus) {
+      statusBox.textContent = `Adjusting overlay for ${activeTarget.name}.`;
+    }
+
+    if (shouldRestartTracking) {
+      try {
+        await video.play();
+        video.pause();
+        video.currentTime = 0;
+        await mindarSystem.start();
+      } catch (error) {
+        console.warn("Restart after target switch failed", error);
+        statusBox.textContent = `Switch target failed. Refresh Creator and try ${activeTarget.name} again.`;
+      }
+    }
+  }
+
+  function recreateTargetEntity(targetConfig) {
+    if (target && target.parentNode) {
+      target.remove();
+    }
+
+    const nextTarget = document.createElement("a-entity");
+    nextTarget.id = "creatorImageTarget";
+    nextTarget.setAttribute("mindar-image-target", `targetIndex: ${targetConfig.targetIndex}`);
+
+    const nextOverlay = document.createElement("a-video");
+    nextOverlay.setAttribute("src", "#creatorArVideo");
+    nextTarget.append(nextOverlay);
+
+    nextTarget.addEventListener("targetFound", handleTargetFound);
+    nextTarget.addEventListener("targetLost", handleTargetLost);
+
+    scene.append(nextTarget);
+    target = nextTarget;
+    overlay = nextOverlay;
+  }
+
+  function applyVideoConfig(targetConfig) {
+    const videoConfig = targetConfig.video || {};
+    video.pause();
+    video.src = targetConfig.overlayPath;
+    video.loop = videoConfig.loop !== undefined ? videoConfig.loop : true;
+    video.muted = videoConfig.muted !== undefined ? videoConfig.muted : true;
+    video.playsInline = videoConfig.playsInline !== undefined ? videoConfig.playsInline : true;
+    video.toggleAttribute("loop", video.loop);
+    video.toggleAttribute("muted", video.muted);
+    video.toggleAttribute("playsinline", video.playsInline);
+    video.toggleAttribute("webkit-playsinline", video.playsInline);
+    video.load();
+  }
+
+  function loadOverlayState(targetConfig) {
+    baseOverlay = overlayStateFromTarget(targetConfig);
+    baseUpdatedAt = targetConfig.updatedAt || "";
+    state.width = baseOverlay.width;
+    state.height = baseOverlay.height;
+    state.position = { ...baseOverlay.position };
+    state.rotation = { ...baseOverlay.rotation };
+    updateControlValues();
+    applyOverlayState();
+  }
 
   function createControl(control) {
     const value = getStateValue(control.key);
@@ -168,10 +483,21 @@
 
     range.addEventListener("input", sync);
     number.addEventListener("input", sync);
+    controlInputs.set(control.key, { range, number });
 
     row.append(range, number);
     group.append(label, row);
     controlsRoot.append(group);
+  }
+
+  function updateControlValues() {
+    controls.forEach((control) => {
+      const inputs = controlInputs.get(control.key);
+      if (!inputs) return;
+      const value = getStateValue(control.key);
+      inputs.range.value = value;
+      inputs.number.value = value;
+    });
   }
 
   function setActiveTab(tabName) {
@@ -209,121 +535,220 @@
   async function deployOverlayConfig() {
     deployConfigButton.disabled = true;
     saveConfigButton.disabled = true;
-    statusBox.textContent = "กำลัง Save & Deploy...";
+    statusBox.textContent = "Validating library from disk...";
 
     try {
-      const response = await fetch("/api/deploy-overlay", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          overlay: getOverlayPayload(),
-          baseOverlay,
-          dryRun: false
-        })
-      });
-      const result = await response.json();
+      const payload = getDeployPayload();
+      const result = await requestLibraryPrepare(payload);
 
-      if (!response.ok || !result.ok) {
-        throw new Error(result.error || "Deploy failed.");
-      }
-
-      if (!result.changed) {
-        statusBox.textContent = "ไม่มีค่าใหม่ให้ deploy";
+      snippetBox.value = buildPrepareDeployReport(result);
+      if (!result.ready) {
+        statusBox.textContent = "Library is not ready to deploy. See the report below.";
         return;
       }
 
-      statusBox.textContent = `Deploy แล้ว: ${result.commitSha.slice(0, 7)} Netlify กำลัง deploy`;
+      if (!confirmDeploy(result)) {
+        statusBox.textContent = "Deploy cancelled. No git state was changed.";
+        return;
+      }
+
+      statusBox.textContent = "Validating and deploying library... This may take up to 2 minutes.";
+      const deployResult = await requestLibraryDeploy({
+        ...payload,
+        confirmedFiles: result.filesToDeploy
+      });
+      if (!deployResult.deployed) {
+        snippetBox.value = buildNoDeployReport(deployResult);
+        statusBox.textContent = deployResult.message || "Nothing new to deploy.";
+        return;
+      }
+      snippetBox.value = buildDeploySuccessReport(deployResult);
+      statusBox.textContent = `Deploy successful: ${deployResult.shortCommitSha} pushed to ${deployResult.remote}.`;
     } catch (error) {
       console.error(error);
-      statusBox.textContent = `Deploy ไม่สำเร็จ: ${error.message}`;
+      statusBox.textContent = error.name === "AbortError"
+        ? "Request timed out. Check the helper window and git status before trying again."
+        : `Deploy failed: ${error.message}`;
     } finally {
       deployConfigButton.disabled = false;
       saveConfigButton.disabled = false;
     }
   }
 
-  async function saveOverlayToConfigFile() {
-    if (!window.showOpenFilePicker) {
-      statusBox.textContent = "บราวเซอร์นี้ยัง Save ลงไฟล์ไม่ได้ ใช้ Chrome desktop หรือ Download แทน";
-      return;
+  function getDeployPayload() {
+    return {
+      baseLibraryVersion: window.AR_LIBRARY && window.AR_LIBRARY.version,
+      baseTargetStates: getBaseTargetStates()
+    };
+  }
+
+  async function requestLibraryPrepare(payload) {
+    const response = await fetch("/api/library/prepare-deploy", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+    const result = await response.json();
+
+    if (!response.ok || !result.ok) {
+      throw new Error(result.error || "Prepare deploy failed.");
     }
+    return result;
+  }
+
+  async function requestLibraryDeploy(payload) {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 180000);
 
     try {
-      statusBox.textContent = "เลือกไฟล์ src/ar-config.js";
-      const [fileHandle] = await window.showOpenFilePicker({
-        multiple: false,
-        types: [
-          {
-            description: "AR config JavaScript",
-            accept: {
-              "text/javascript": [".js"],
-              "application/javascript": [".js"]
-            }
-          }
-        ]
+      const response = await fetch("/api/library/deploy", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal
       });
+      const result = await response.json();
 
-      if (fileHandle.name !== "ar-config.js") {
-        statusBox.textContent = "ยังไม่ได้บันทึก: กรุณาเลือกไฟล์ src/ar-config.js";
-        return;
+      if (!response.ok || !result.ok) {
+        throw new Error(result.error || "Library deploy failed.");
       }
-
-      const file = await fileHandle.getFile();
-      const configText = await file.text();
-      const nextConfigText = replaceOverlayBlock(configText);
-      const writable = await fileHandle.createWritable();
-      await writable.write(nextConfigText);
-      await writable.close();
-
-      statusBox.textContent = "บันทึกลง ar-config.js แล้ว เปิดหน้า / เพื่อทดสอบค่าใหม่";
-    } catch (error) {
-      if (error.name === "AbortError") {
-        statusBox.textContent = "ยกเลิกการเลือกไฟล์";
-        return;
-      }
-
-      console.error(error);
-      statusBox.textContent = "Save ไม่สำเร็จ: ใช้ Download แทนก่อน";
+      return result;
+    } finally {
+      window.clearTimeout(timeoutId);
     }
   }
 
-  function replaceOverlayBlock(configText) {
-    const overlayPattern = /(\n)(\s*)overlay:\s*\{\s*\n[\s\S]*?\n\s*\}(\s*,)/;
-    const match = configText.match(overlayPattern);
+  function confirmDeploy(result) {
+    return window.confirm([
+      "Library พร้อม deploy:",
+      `- ${result.librarySummary.enabledTargets} enabled targets`,
+      `- ${result.filesToDeploy.length} files`,
+      "- จะ commit และ push ไป origin/main",
+      "- unrelated working-tree changes จะไม่ถูกรวม",
+      "",
+      "กด OK เพื่อ Save & Deploy หรือ Cancel เพื่อยกเลิก"
+    ].join("\n"));
+  }
 
-    if (!match) {
-      throw new Error("Cannot find overlay block in config file.");
+  function getBaseTargetStates() {
+    const sourceTargets =
+      window.AR_LIBRARY && Array.isArray(window.AR_LIBRARY.targets)
+        ? window.AR_LIBRARY.targets
+        : [];
+    return sourceTargets.map((targetConfig) => ({
+      id: targetConfig.id,
+      updatedAt: targetConfig.updatedAt || ""
+    }));
+  }
+
+  function buildPrepareDeployReport(result) {
+    const lines = [
+      result.ready ? "Ready to deploy" : "Not ready to deploy",
+      "",
+      `Targets: ${result.librarySummary.enabledTargets}/${result.librarySummary.totalTargets} enabled`,
+      "",
+      "Files to deploy:",
+      ...listLines(result.filesToDeploy),
+      "",
+      "Warnings:",
+      ...listLines(result.warnings),
+      "",
+      "Unrelated working-tree changes:",
+      ...listLines(result.unrelatedChanges)
+    ];
+
+    if (result.errors && result.errors.length) {
+      lines.splice(2, 0, "", "Errors:", ...listLines(result.errors));
     }
 
-    const indent = match[2];
-    const nextOverlayBlock = [
-      `${indent}overlay: {`,
-      `${indent}  width: ${formatNumber(state.width)},`,
-      `${indent}  height: ${formatNumber(state.height)},`,
-      `${indent}  position: "${vectorToString(state.position)}",`,
-      `${indent}  rotation: "${vectorToString(state.rotation)}"`,
-      `${indent}}`
-    ].join("\n");
+    return lines.join("\n");
+  }
 
-    return configText.replace(overlayPattern, `$1${nextOverlayBlock}$3`);
+  function buildDeploySuccessReport(result) {
+    return [
+      "Deploy successful",
+      `Commit: ${result.shortCommitSha}`,
+      `Branch: ${result.branch}`,
+      `Pushed to: ${result.remote}`,
+      `Targets: ${result.librarySummary.enabledTargets}`,
+      `Files deployed: ${result.filesDeployed.length}`,
+      "Netlify deployment should begin automatically.",
+      "",
+      "Files deployed:",
+      ...listLines(result.filesDeployed)
+    ].join("\n");
+  }
+
+  function buildNoDeployReport(result) {
+    return [
+      result.message || "Nothing new to deploy.",
+      "",
+      "Files checked:",
+      ...listLines(result.filesDeployed),
+      "",
+      `Targets: ${result.librarySummary.enabledTargets}/${result.librarySummary.totalTargets} enabled`
+    ].join("\n");
+  }
+
+  function listLines(items) {
+    if (!items || !items.length) return ["- none"];
+    return items.map((item) => `- ${typeof item === "string" ? item : JSON.stringify(item)}`);
+  }
+
+  async function saveOverlayToLibrary() {
+    saveConfigButton.disabled = true;
+    try {
+      statusBox.textContent = `Saving overlay for ${activeTarget.name}...`;
+      const response = await fetch("/api/library/save-overlay", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          targetId: activeTarget.id,
+          overlay: getOverlayPayload(),
+          baseUpdatedAt
+        })
+      });
+      const result = await response.json();
+
+      if (!response.ok || !result.ok) {
+        throw new Error(result.error || "Save failed.");
+      }
+
+      window.AR_LIBRARY = result.library;
+      enabledTargets = getEnabledTargets(window.AR_LIBRARY);
+      populateTargetSelect();
+      const savedTarget = result.library.targets.find((item) => item.id === activeTarget.id);
+      if (savedTarget) {
+        activeTarget = savedTarget;
+        baseUpdatedAt = savedTarget.updatedAt || "";
+        targetSelect.value = activeTarget.id;
+      }
+      window.dispatchEvent(new CustomEvent("ar-library-updated"));
+      statusBox.textContent = `Saved overlay for ${activeTarget.name} locally.`;
+    } catch (error) {
+      console.error(error);
+      if (/changed since Creator loaded/i.test(error.message)) {
+        statusBox.textContent = `Conflict while saving ${activeTarget.name}. Refresh Creator and try again.`;
+        return;
+      }
+      statusBox.textContent = `Save failed for ${activeTarget.name}: ${error.message}`;
+    } finally {
+      saveConfigButton.disabled = false;
+    }
   }
 
   function getOverlayPayload() {
     return {
       width: Number(formatNumber(state.width)),
       height: Number(formatNumber(state.height)),
-      position: {
-        x: Number(formatNumber(state.position.x)),
-        y: Number(formatNumber(state.position.y)),
-        z: Number(formatNumber(state.position.z))
-      },
-      rotation: {
-        x: Number(formatNumber(state.rotation.x)),
-        y: Number(formatNumber(state.rotation.y)),
-        z: Number(formatNumber(state.rotation.z))
-      }
+      position: vectorToString(state.position),
+      rotation: vectorToString(state.rotation)
     };
   }
 
@@ -355,14 +780,53 @@
     state[parts[0]][parts[1]] = value;
   }
 
-  function getCreatorTarget(library) {
+  function overlayStateFromTarget(targetConfig) {
+    const initialPosition = parseVector(targetConfig.overlay.position);
+    const initialRotation = parseVector(targetConfig.overlay.rotation);
+    return {
+      width: Number(targetConfig.overlay.width),
+      height: Number(targetConfig.overlay.height),
+      position: {
+        x: initialPosition[0],
+        y: initialPosition[1],
+        z: initialPosition[2]
+      },
+      rotation: {
+        x: initialRotation[0],
+        y: initialRotation[1],
+        z: initialRotation[2]
+      }
+    };
+  }
+
+  function getEnabledTargets(library) {
     if (!library || !Array.isArray(library.targets)) {
       throw new Error("AR_LIBRARY is missing.");
     }
-    const target = library.targets.find((item) => item.enabled);
-    if (!target) {
-      throw new Error("AR_LIBRARY has no enabled target.");
-    }
-    return target;
+    return library.targets
+      .filter((item) => item.enabled)
+      .slice(0, library.maxActiveTargets || 10)
+      .sort((a, b) => Number(a.targetIndex) - Number(b.targetIndex));
+  }
+
+  function getLibraryTargets() {
+    const sourceTargets =
+      window.AR_LIBRARY && Array.isArray(window.AR_LIBRARY.targets)
+        ? window.AR_LIBRARY.targets
+        : [];
+    return [...sourceTargets].sort((a, b) => {
+      const aIndex = Number(a.targetIndex);
+      const bIndex = Number(b.targetIndex);
+      const aHasIndex = Number.isFinite(aIndex);
+      const bHasIndex = Number.isFinite(bIndex);
+      if (aHasIndex && bHasIndex) return aIndex - bIndex;
+      if (aHasIndex) return -1;
+      if (bHasIndex) return 1;
+      return String(a.name || a.id).localeCompare(String(b.name || b.id));
+    });
+  }
+
+  function fileNameFromPath(path) {
+    return String(path || "").split("/").pop() || "none";
   }
 })();

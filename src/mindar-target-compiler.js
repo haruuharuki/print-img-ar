@@ -2,8 +2,9 @@
   const COMPILER_MODULE_URL = "https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image.prod.js";
   const MAX_TARGET_EDGE = 1200;
   const MAX_TARGET_PIXELS = 1400000;
-  const MAX_TARGET_COUNT = 10;
+  const MAX_ACTIVE_TARGETS = 10;
 
+  const nameInput = document.querySelector("#targetNameInput");
   const imageInput = document.querySelector("#targetImageInput");
   const previewList = document.querySelector("#targetImagePreviewList");
   const compileButton = document.querySelector("#compileTargetButton");
@@ -15,53 +16,66 @@
   const overlayVideoPreview = document.querySelector("#overlayVideoPreview");
   const overlayStatus = document.querySelector("#overlayMediaStatus");
 
-  if (!imageInput || !previewList || !compileButton || !downloadButton || !statusText || !progress) {
+  if (!nameInput || !imageInput || !previewList || !compileButton || !downloadButton || !statusText || !progress) {
     return;
   }
 
-  let selectedFiles = [];
-  let previewUrls = [];
+  let selectedImageFile = null;
+  let selectedOverlayFile = null;
+  let targetPreviewUrl = null;
   let overlayPreviewUrl = null;
   let compiledMindBlob = null;
   let compiledMindFileName = "targets.mind";
   let compilerLoadPromise = null;
+  let editingTargetId = null;
 
   imageInput.addEventListener("change", () => {
+    const file = imageInput.files && imageInput.files[0];
+
+    // Some browsers fire change after the picker is cancelled.
+    // Keep the previous selected file and preview in that case.
+    if (!file) {
+      updateCompileButton();
+      return;
+    }
+
+    if (!file.type.startsWith("image/")) {
+      setStatus("Please choose a PNG, JPG, or WebP target image.");
+      updateCompileButton();
+      return;
+    }
+
     clearCompiledResult();
-    clearTargetPreviews();
+    clearTargetPreview();
 
-    const files = Array.from(imageInput.files || []);
-    if (!files.length) {
-      selectedFiles = [];
-      compileButton.disabled = true;
-      setStatus("Choose one or more target images to compile one targets.mind file.");
-      return;
+    selectedImageFile = file;
+    if (!nameInput.value.trim()) {
+      nameInput.value = fileBaseName(file.name);
     }
-
-    const invalidFile = files.find((file) => !file.type.startsWith("image/"));
-    if (invalidFile) {
-      selectedFiles = [];
-      compileButton.disabled = true;
-      setStatus(`Please choose only PNG, JPG, or WebP images. ${invalidFile.name} is not supported.`);
-      return;
-    }
-
-    if (files.length > MAX_TARGET_COUNT) {
-      selectedFiles = [];
-      compileButton.disabled = true;
-      setStatus(`Please choose ${MAX_TARGET_COUNT} target images or fewer for this prototype.`);
-      return;
-    }
-
-    selectedFiles = files;
-    renderTargetPreviews(files);
-    compileButton.disabled = false;
-    compiledMindFileName = targetMindFileName(files);
-    setStatus(`Ready: ${files.length} target image${files.length === 1 ? "" : "s"}. Output will be ${compiledMindFileName}.`);
+    renderTargetPreview(file);
+    setStatus(`Target ready: ${file.name}. Choose an MP4 overlay, then save to library.`);
+    updateCompileButton();
   });
+
+  nameInput.addEventListener("input", updateCompileButton);
 
   if (overlayInput && overlayImagePreview && overlayVideoPreview && overlayStatus) {
     overlayInput.addEventListener("change", () => {
+      const file = overlayInput.files && overlayInput.files[0];
+
+      // Preserve the previous selection when the file picker is cancelled.
+      if (!file) {
+        updateCompileButton();
+        return;
+      }
+
+      if (file.type !== "video/mp4") {
+        overlayStatus.textContent = "Please choose an MP4 overlay video.";
+        updateCompileButton();
+        return;
+      }
+
+      clearCompiledResult();
       revokeOverlayPreviewUrl();
       overlayImagePreview.classList.add("hidden");
       overlayVideoPreview.classList.add("hidden");
@@ -69,52 +83,59 @@
       overlayVideoPreview.pause();
       overlayVideoPreview.removeAttribute("src");
 
-      const file = overlayInput.files && overlayInput.files[0];
-      if (!file) {
-        overlayStatus.textContent = "Choose an overlay image or MP4 to preview. This prototype does not deploy it yet.";
-        return;
-      }
-
-      if (!file.type.startsWith("image/") && file.type !== "video/mp4") {
-        overlayStatus.textContent = "Please choose a PNG, JPG, WebP, or MP4 file.";
-        return;
-      }
-
+      selectedOverlayFile = file;
       overlayPreviewUrl = URL.createObjectURL(file);
-      if (file.type.startsWith("image/")) {
-        overlayImagePreview.src = overlayPreviewUrl;
-        overlayImagePreview.classList.remove("hidden");
-      } else {
-        overlayVideoPreview.src = overlayPreviewUrl;
-        overlayVideoPreview.classList.remove("hidden");
-      }
-      overlayStatus.textContent = `Preview ready: ${file.name}`;
+      overlayVideoPreview.src = overlayPreviewUrl;
+      overlayVideoPreview.classList.remove("hidden");
+      overlayStatus.textContent = `Overlay ready: ${file.name}`;
+      updateCompileButton();
     });
   }
 
   compileButton.addEventListener("click", async () => {
-    if (!selectedFiles.length) return;
+    if (!selectedImageFile || !selectedOverlayFile) return;
+
+    const currentLibrary = window.AR_LIBRARY;
+    const target = buildTargetEntry(currentLibrary);
+    const existingTarget = findLibraryTarget(target.id);
+
+    if (existingTarget) {
+      const confirmed = window.confirm(
+        `Target "${existingTarget.name}" already exists.\n\n` +
+        "Saving will replace its target image and overlay video, then recompile all enabled targets.\n\n" +
+        "Continue and overwrite it?"
+      );
+
+      if (!confirmed) {
+        setStatus(`Update cancelled. Target "${existingTarget.name}" was not changed.`);
+        updateCompileButton();
+        return;
+      }
+    }
 
     clearCompiledResult();
     compileButton.disabled = true;
-    downloadButton.disabled = true;
     progress.value = 0;
     progress.classList.remove("hidden");
-    setStatus("Loading MindAR compiler...");
 
     try {
+      const nextLibrary = buildNextLibrary(currentLibrary, target);
+      const activeTargets = nextLibrary.targets.filter((item) => item.enabled);
+      if (activeTargets.length > MAX_ACTIVE_TARGETS) {
+        throw new Error(`This prototype supports up to ${MAX_ACTIVE_TARGETS} active targets.`);
+      }
+
       const Compiler = await loadCompiler();
       const targetImages = [];
-
-      for (let index = 0; index < selectedFiles.length; index++) {
-        const file = selectedFiles[index];
-        setStatus(`Preparing target ${index + 1} of ${selectedFiles.length}: ${file.name}`);
-        targetImages.push(await createCompileImage(file));
+      for (let index = 0; index < activeTargets.length; index++) {
+        const activeTarget = activeTargets[index];
+        setStatus(`Preparing target ${index + 1} of ${activeTargets.length}: ${activeTarget.name}`);
+        const blob = activeTarget.id === target.id ? selectedImageFile : await fetchAssetBlob(activeTarget.imagePath);
+        targetImages.push(await createCompileImage(blob));
       }
 
       const compiler = new Compiler();
-
-      setStatus(`Compiling ${targetImages.length} target image${targetImages.length === 1 ? "" : "s"}...`);
+      setStatus(`Compiling ${activeTargets.length} active target${activeTargets.length === 1 ? "" : "s"}...`);
       await compiler.compileImageTargets(targetImages, (percent) => {
         progress.value = clampPercent(percent);
         setStatus(`Compiling... ${Math.round(progress.value)}%`);
@@ -122,62 +143,123 @@
 
       const exported = compiler.exportData();
       compiledMindBlob = new Blob([exported], { type: "application/octet-stream" });
+      compiledMindFileName = `${target.id}.library.targets.mind`;
       progress.value = 100;
+
+      setStatus("Saving files to local library...");
+      const result = await saveTargetToLibrary({
+        library: nextLibrary,
+        target,
+        targetImage: selectedImageFile,
+        overlayVideo: selectedOverlayFile,
+        targetsMind: compiledMindBlob
+      });
+
+      window.AR_LIBRARY = result.library;
+      window.dispatchEvent(new CustomEvent("ar-library-updated"));
       downloadButton.disabled = false;
-      setStatus(`Success. ${compiledMindFileName} is ready (${formatBytes(compiledMindBlob.size)}).`);
+      const action = existingTarget ? "Updated" : "Saved";
+      setStatus(`${action} ${target.name}. Active targets: ${result.activeTargets}. Refresh Creator/Viewer to use the updated library.`);
     } catch (error) {
       console.error(error);
       progress.classList.add("hidden");
-      setStatus(`Compile failed: ${friendlyError(error)}`);
+      setStatus(`Save failed: ${friendlyError(error)}`);
     } finally {
-      compileButton.disabled = !selectedFiles.length;
+      updateCompileButton();
     }
   });
 
   downloadButton.addEventListener("click", async () => {
     if (!compiledMindBlob) return;
-    if (window.showSaveFilePicker) {
-      try {
-        await saveMindWithPicker(compiledMindBlob, compiledMindFileName);
-        setStatus(`Saved ${compiledMindFileName}. For the current viewer, place it in assets as targets.mind.`);
-        return;
-      } catch (error) {
-        if (error.name === "AbortError") {
-          setStatus("Save cancelled. The compiled targets.mind is still ready.");
-          return;
-        }
-        console.warn("Save picker failed, falling back to download", error);
-        setStatus("Save picker failed, downloading with browser default instead.");
-      }
-    }
-
     downloadMindBlob(compiledMindBlob, compiledMindFileName);
   });
 
-  async function saveMindWithPicker(blob, fileName) {
-    const handle = await window.showSaveFilePicker({
-      suggestedName: fileName,
-      types: [
-        {
-          description: "MindAR image target",
-          accept: {
-            "application/octet-stream": [".mind"]
-          }
-        }
-      ]
-    });
-    const writable = await handle.createWritable();
-    await writable.write(blob);
-    await writable.close();
+  function buildTargetEntry(library) {
+    const name = nameInput.value.trim() || fileBaseName(selectedImageFile.name);
+    const id = editingTargetId || slugify(name || selectedImageFile.name);
+    const imageExt = fileExtension(selectedImageFile.name, ".png");
+    const overlayExt = ".mp4";
+    const existing = (library.targets || []).find((item) => item.id === id);
+    const baseOverlay = (existing && existing.overlay) || (library.targets && library.targets[0] && library.targets[0].overlay) || {
+      width: 1,
+      height: 1,
+      position: "0 0 0.01",
+      rotation: "0 0 0"
+    };
+
+    return {
+      id,
+      name,
+      enabled: true,
+      targetIndex: 0,
+      imagePath: `./assets/targets/${id}${imageExt}`,
+      overlayPath: `./assets/overlays/${id}${overlayExt}`,
+      overlayType: "video",
+      overlay: {
+        width: Number(baseOverlay.width),
+        height: Number(baseOverlay.height),
+        position: baseOverlay.position,
+        rotation: baseOverlay.rotation
+      },
+      video: {
+        autoplay: true,
+        loop: true,
+        muted: true,
+        playsInline: true
+      },
+      updatedAt: new Date().toISOString()
+    };
   }
 
-  function downloadMindBlob(blob, fileName) {
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = fileName;
-    link.click();
-    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  function buildNextLibrary(library, target) {
+    let foundExisting = false;
+    const targets = (library.targets || []).map((item) => {
+      if (item.id !== target.id) {
+        return item;
+      }
+      foundExisting = true;
+      return target;
+    });
+
+    if (!foundExisting) {
+      targets.push(target);
+    }
+
+    let activeIndex = 0;
+    targets.forEach((item) => {
+      if (item.enabled) {
+        item.targetIndex = activeIndex;
+        activeIndex += 1;
+      } else {
+        item.targetIndex = null;
+      }
+    });
+
+    return {
+      version: 1,
+      maxActiveTargets: library.maxActiveTargets || MAX_ACTIVE_TARGETS,
+      targetFile: "./assets/targets.mind",
+      targets
+    };
+  }
+
+  async function saveTargetToLibrary({ library, target, targetImage, overlayVideo, targetsMind }) {
+    const form = new FormData();
+    form.append("library", JSON.stringify(library));
+    form.append("targetId", target.id);
+    form.append("targetImage", targetImage, targetImage.name);
+    form.append("overlayVideo", overlayVideo, overlayVideo.name);
+    form.append("targetsMind", targetsMind, "targets.mind");
+
+    const response = await fetch("/api/library/save-target", {
+      method: "POST",
+      body: form
+    });
+    const result = await response.json();
+    if (!response.ok || !result.ok) {
+      throw new Error(result.error || "helper save failed");
+    }
+    return result;
   }
 
   async function loadCompiler() {
@@ -193,8 +275,16 @@
     return compilerLoadPromise;
   }
 
-  async function createCompileImage(file) {
-    const originalImage = await loadImageFromFile(file);
+  async function fetchAssetBlob(path) {
+    const response = await fetch(path, { cache: "no-store" });
+    if (!response.ok) {
+      throw new Error(`Could not load existing target image: ${path}`);
+    }
+    return response.blob();
+  }
+
+  async function createCompileImage(blob) {
+    const originalImage = await loadImageFromBlob(blob);
     const size = fitTargetSize(originalImage.naturalWidth, originalImage.naturalHeight);
 
     if (size.width === originalImage.naturalWidth && size.height === originalImage.naturalHeight) {
@@ -212,10 +302,6 @@
     return loadImageFromBlob(await canvasToBlob(canvas));
   }
 
-  function loadImageFromFile(file) {
-    return loadImageFromBlob(file);
-  }
-
   function loadImageFromBlob(blob) {
     return new Promise((resolve, reject) => {
       const url = URL.createObjectURL(blob);
@@ -227,7 +313,7 @@
       };
       image.onerror = () => {
         URL.revokeObjectURL(url);
-        reject(new Error("Could not read the selected image."));
+        reject(new Error("Could not read a target image."));
       };
 
       image.src = url;
@@ -251,64 +337,35 @@
         if (blob) {
           resolve(blob);
         } else {
-          reject(new Error("Could not resize the selected image."));
+          reject(new Error("Could not resize a target image."));
         }
       }, "image/png");
     });
   }
 
-  function clearCompiledResult() {
-    compiledMindBlob = null;
-    downloadButton.disabled = true;
-    progress.value = 0;
-    progress.classList.add("hidden");
-  }
+  function renderTargetPreview(file) {
+    clearTargetPreview();
+    targetPreviewUrl = URL.createObjectURL(file);
+    const item = document.createElement("div");
+    item.className = "target-preview-item";
 
-  function targetMindFileName(files) {
-    const names = files.map((file, index) => safeFileBaseName(file.name) || `target-${index + 1}`);
-    if (!names.length) return "targets.mind";
-    if (names.length === 1) return `${names[0]}.targets.mind`;
+    const image = document.createElement("img");
+    image.src = targetPreviewUrl;
+    image.alt = `${file.name} preview`;
 
-    const prefix = names.slice(0, 3).join("-");
-    return `${prefix}-${names.length}-targets.mind`;
-  }
+    const label = document.createElement("span");
+    label.textContent = file.name;
 
-  function safeFileBaseName(fileName) {
-    return fileName
-      .replace(/\.[^.]*$/, "")
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "");
-  }
-
-  function renderTargetPreviews(files) {
-    clearTargetPreviews();
-
-    files.forEach((file) => {
-      const url = URL.createObjectURL(file);
-      previewUrls.push(url);
-
-      const item = document.createElement("div");
-      item.className = "target-preview-item";
-
-      const image = document.createElement("img");
-      image.src = url;
-      image.alt = `${file.name} preview`;
-
-      const label = document.createElement("span");
-      label.textContent = file.name;
-
-      item.append(image, label);
-      previewList.append(item);
-    });
-
+    item.append(image, label);
+    previewList.append(item);
     previewList.classList.remove("hidden");
   }
 
-  function clearTargetPreviews() {
-    previewUrls.forEach((url) => URL.revokeObjectURL(url));
-    previewUrls = [];
+  function clearTargetPreview() {
+    if (targetPreviewUrl) {
+      URL.revokeObjectURL(targetPreviewUrl);
+      targetPreviewUrl = null;
+    }
     previewList.replaceChildren();
     previewList.classList.add("hidden");
   }
@@ -318,6 +375,126 @@
       URL.revokeObjectURL(overlayPreviewUrl);
       overlayPreviewUrl = null;
     }
+  }
+
+  function clearCompiledResult() {
+    compiledMindBlob = null;
+    downloadButton.disabled = true;
+    progress.value = 0;
+    progress.classList.add("hidden");
+  }
+
+  function updateCompileButton() {
+    const hasRequiredInput = Boolean(
+      selectedImageFile &&
+      selectedOverlayFile &&
+      nameInput.value.trim()
+    );
+
+    compileButton.disabled = !hasRequiredInput;
+
+    const pendingId = pendingTargetId();
+    compileButton.textContent =
+      editingTargetId || (pendingId && findLibraryTarget(pendingId))
+        ? "Update existing target"
+        : "Save new target";
+  }
+
+  function pendingTargetId() {
+    const name = nameInput.value.trim();
+    if (!name) return "";
+    return slugify(name);
+  }
+
+  function findLibraryTarget(targetId) {
+    const library = window.AR_LIBRARY;
+    const targets =
+      library && Array.isArray(library.targets)
+        ? library.targets
+        : [];
+
+    return targets.find((target) => target.id === targetId) || null;
+  }
+
+  function startEditingTarget(targetId) {
+    const target = findLibraryTarget(targetId);
+    if (!target) {
+      setStatus(`Target not found: ${targetId}`);
+      return;
+    }
+
+    editingTargetId = target.id;
+    selectedImageFile = null;
+    selectedOverlayFile = null;
+    imageInput.value = "";
+    overlayInput.value = "";
+    nameInput.value = target.name || target.id;
+    clearCompiledResult();
+    renderExistingTargetPreview(target);
+    renderExistingOverlayPreview(target);
+    setStatus(
+      `Editing existing target: ${target.name}. Current image: ${fileNameFromPath(target.imagePath)}. Choose a new target image only if you want to replace it.`
+    );
+    overlayStatus.textContent =
+      `Current overlay: ${fileNameFromPath(target.overlayPath)}. Choose a new MP4 only if you want to replace it.`;
+    updateCompileButton();
+  }
+
+  function renderExistingTargetPreview(target) {
+    clearTargetPreview();
+    const item = document.createElement("div");
+    item.className = "target-preview-item";
+
+    const image = document.createElement("img");
+    image.src = target.imagePath;
+    image.alt = `${target.name} target image`;
+
+    const label = document.createElement("span");
+    label.textContent = fileNameFromPath(target.imagePath);
+
+    item.append(image, label);
+    previewList.append(item);
+    previewList.classList.remove("hidden");
+  }
+
+  function renderExistingOverlayPreview(target) {
+    revokeOverlayPreviewUrl();
+    overlayImagePreview.classList.add("hidden");
+    overlayImagePreview.removeAttribute("src");
+    overlayVideoPreview.pause();
+    overlayVideoPreview.src = target.overlayPath;
+    overlayVideoPreview.classList.remove("hidden");
+    overlayVideoPreview.load();
+  }
+
+  function downloadMindBlob(blob, fileName) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = fileName;
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
+  function fileBaseName(fileName) {
+    return String(fileName).replace(/\.[^.]*$/, "").trim();
+  }
+
+  function fileExtension(fileName, fallback) {
+    const extension = String(fileName).match(/\.[^.]+$/);
+    return extension ? extension[0].toLowerCase() : fallback;
+  }
+
+  function fileNameFromPath(path) {
+    return String(path || "").split("/").pop() || "none";
+  }
+
+  function slugify(value) {
+    return String(value)
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "target";
   }
 
   function setStatus(message) {
@@ -330,16 +507,14 @@
     return Math.max(0, Math.min(100, number));
   }
 
-  function formatBytes(bytes) {
-    if (bytes < 1024) return `${bytes} bytes`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-  }
-
   function friendlyError(error) {
     if (!navigator.onLine) {
       return "internet connection is required the first time the compiler bundle loads.";
     }
     return error && error.message ? error.message : "unknown error";
   }
+
+  window.CreatorProjectSetup = {
+    editTarget: startEditingTarget
+  };
 })();
