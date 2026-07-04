@@ -6,6 +6,14 @@
   const target = document.querySelector("#imageTarget");
   const video = document.querySelector("#arVideo");
   const overlay = target.querySelector("a-video");
+  const capture =
+    window.ARCapture &&
+    window.ARCapture.init({
+      scene,
+      statusBox,
+      overlayElement: overlay,
+      overlayVideo: video
+    });
 
   let hasStarted = false;
 
@@ -43,6 +51,7 @@
       await mindarSystem.start();
 
       hasStarted = true;
+      capture && capture.setStarted(true);
       startButton.classList.add("hidden");
       statusBox.textContent = config.ui.scanningText;
     } catch (error) {
@@ -54,6 +63,7 @@
   target.addEventListener("targetFound", async () => {
     statusBox.textContent = config.ui.foundText;
     if (!hasStarted) return;
+    capture && capture.setTargetVisible(true);
     if (config.video.autoplay) {
       try {
         await video.play();
@@ -65,6 +75,7 @@
 
   target.addEventListener("targetLost", () => {
     statusBox.textContent = config.ui.lostText;
+    capture && capture.setTargetVisible(false);
     video.pause();
   });
 })();
