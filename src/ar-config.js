@@ -18,6 +18,15 @@
       position: "0 0 0.01",
       rotation: "0 0 0"
     },
+    tracking: {
+      smoothing: {
+        enabled: true,
+        filterMinCF: 0.001,
+        filterBeta: 500,
+        warmupTolerance: 5,
+        missTolerance: 8
+      }
+    },
     ui: {
       initialText: "กดเริ่ม แล้วส่องกล้องไปที่รูปที่ปริ้นไว้ ✨",
       startButtonText: "เริ่ม AR",
