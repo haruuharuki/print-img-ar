@@ -2,6 +2,7 @@
   const config = window.AR_VIEWER_CONFIG;
   const scene = document.querySelector("a-scene");
   const startButton = document.querySelector("#startButton");
+  const cameraSwitchButton = document.querySelector("#cameraSwitchButton");
   const statusBox = document.querySelector("#status");
   const target = document.querySelector("#imageTarget");
   const video = document.querySelector("#arVideo");
@@ -16,6 +17,9 @@
     });
 
   let hasStarted = false;
+  let currentFacingMode = "environment";
+  let isSwitchingCamera = false;
+  const restoreGetUserMedia = installFacingModeOverride(() => currentFacingMode);
 
   scene.setAttribute(
     "mindar-image",
@@ -52,11 +56,48 @@
 
       hasStarted = true;
       capture && capture.setStarted(true);
+      cameraSwitchButton.classList.remove("hidden");
+      cameraSwitchButton.disabled = false;
       startButton.classList.add("hidden");
       statusBox.textContent = config.ui.scanningText;
     } catch (error) {
       console.error(error);
       statusBox.textContent = config.ui.errorText;
+    }
+  });
+
+  cameraSwitchButton.addEventListener("click", async () => {
+    if (!hasStarted || isSwitchingCamera) return;
+
+    const previousFacingMode = currentFacingMode;
+    const nextFacingMode = currentFacingMode === "environment" ? "user" : "environment";
+
+    isSwitchingCamera = true;
+    cameraSwitchButton.disabled = true;
+    capture && capture.setTargetVisible(false);
+    target.object3D.visible = false;
+    video.pause();
+    statusBox.textContent = nextFacingMode === "environment" ? "กำลังสลับไปกล้องหลัง..." : "กำลังสลับไปกล้องหน้า...";
+
+    try {
+      await restartMindARWithFacingMode(nextFacingMode);
+      currentFacingMode = nextFacingMode;
+      statusBox.textContent = config.ui.scanningText;
+    } catch (error) {
+      console.error(error);
+      statusBox.textContent = "สลับกล้องไม่ได้ กำลังกลับไปกล้องเดิม";
+      currentFacingMode = previousFacingMode;
+
+      try {
+        await restartMindARWithFacingMode(previousFacingMode);
+        statusBox.textContent = config.ui.scanningText;
+      } catch (fallbackError) {
+        console.error(fallbackError);
+        statusBox.textContent = "กล้องเริ่มใหม่ไม่ได้ ลอง refresh หน้าเว็บ";
+      }
+    } finally {
+      isSwitchingCamera = false;
+      cameraSwitchButton.disabled = false;
     }
   });
 
@@ -78,4 +119,52 @@
     capture && capture.setTargetVisible(false);
     video.pause();
   });
+
+  window.addEventListener("pagehide", restoreGetUserMedia);
+
+  async function restartMindARWithFacingMode(facingMode) {
+    const mindarSystem = scene.systems["mindar-image-system"];
+    currentFacingMode = facingMode;
+
+    try {
+      mindarSystem.stop();
+    } catch (error) {
+      console.warn("MindAR stop failed during camera switch", error);
+    }
+
+    await mindarSystem.start();
+  }
+
+  function installFacingModeOverride(getFacingMode) {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      return () => {};
+    }
+
+    const originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+
+    navigator.mediaDevices.getUserMedia = (constraints) => {
+      const nextConstraints = cloneConstraints(constraints);
+      if (nextConstraints.video && typeof nextConstraints.video === "object") {
+        nextConstraints.video.facingMode = getFacingMode();
+      }
+      return originalGetUserMedia(nextConstraints);
+    };
+
+    return () => {
+      navigator.mediaDevices.getUserMedia = originalGetUserMedia;
+    };
+  }
+
+  function cloneConstraints(constraints) {
+    if (!constraints || typeof constraints !== "object") {
+      return constraints;
+    }
+    return {
+      ...constraints,
+      video:
+        constraints.video && typeof constraints.video === "object"
+          ? { ...constraints.video }
+          : constraints.video
+    };
+  }
 })();

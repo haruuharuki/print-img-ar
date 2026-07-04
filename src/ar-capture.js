@@ -9,6 +9,8 @@
     const captureButton = document.querySelector("#captureButton");
     const preview = document.querySelector("#capturePreview");
     const previewImage = document.querySelector("#captureImage");
+    const previewHelp = document.querySelector("#captureHelp");
+    const retakeButton = document.querySelector("#retakeCaptureButton");
     const shareButton = document.querySelector("#shareCaptureButton");
     const downloadButton = document.querySelector("#downloadCaptureButton");
     const closeButton = document.querySelector("#closeCaptureButton");
@@ -17,8 +19,11 @@
     let hasVisibleTarget = false;
     let captureBlob = null;
     let captureUrl = null;
+    let isPreviewOpen = false;
+    let captureName = "";
 
     captureButton.addEventListener("click", async () => {
+      if (isPreviewOpen) return;
       if (!hasVisibleTarget) {
         statusBox.textContent = "ยังไม่เจอ AR overlay สำหรับถ่ายภาพ";
         updateShutterState();
@@ -29,10 +34,10 @@
       try {
         const blob = await captureScene({ scene, overlayElement, overlayVideo });
         showPreview(blob);
-        statusBox.textContent = "ถ่ายภาพแล้ว";
+        statusBox.textContent = "ถ่ายภาพแล้ว เลือก Share หรือ Download ได้เลย";
       } catch (error) {
         console.error(error);
-        statusBox.textContent = `ถ่ายภาพไม่ได้: ${error.message}`;
+        statusBox.textContent = friendlyCaptureError(error);
       } finally {
         updateShutterState();
       }
@@ -40,7 +45,7 @@
 
     shareButton.addEventListener("click", async () => {
       if (!captureBlob) return;
-      const file = new File([captureBlob], captureFileName(), { type: "image/png" });
+      const file = new File([captureBlob], captureName || captureFileName(), { type: "image/png" });
 
       if (navigator.canShare && navigator.canShare({ files: [file] }) && navigator.share) {
         try {
@@ -48,20 +53,25 @@
             files: [file],
             title: "AR capture"
           });
+          setPreviewHelp("แชร์แล้ว ถ้าต้องการเก็บในเครื่องให้เลือก Save Image ใน Share Sheet");
           return;
         } catch (error) {
           if (error.name === "AbortError") return;
           console.warn("Share failed, falling back to download", error);
+          setPreviewHelp("Share ไม่สำเร็จ เลยดาวน์โหลดรูปให้แทน");
         }
+      } else {
+        setPreviewHelp("เครื่องนี้ยังแชร์ไฟล์ตรง ๆ ไม่ได้ เลยดาวน์โหลดรูปให้แทน");
       }
 
-      downloadBlob(captureBlob);
+      downloadBlob(captureBlob, captureName);
     });
 
     downloadButton.addEventListener("click", () => {
-      if (captureBlob) downloadBlob(captureBlob);
+      if (captureBlob) downloadBlob(captureBlob, captureName);
     });
 
+    retakeButton.addEventListener("click", hidePreview);
     closeButton.addEventListener("click", hidePreview);
 
     function setStarted(value) {
@@ -76,26 +86,29 @@
     }
 
     function updateShutterState() {
-      captureButton.disabled = !hasStarted || !hasVisibleTarget;
+      captureButton.disabled = isPreviewOpen || !hasStarted || !hasVisibleTarget;
     }
 
     function showPreview(blob) {
       revokeCaptureUrl();
       captureBlob = blob;
+      captureName = captureFileName();
       captureUrl = URL.createObjectURL(blob);
       previewImage.src = captureUrl;
+      isPreviewOpen = true;
       preview.classList.remove("hidden");
-
-      const file = new File([blob], captureFileName(), { type: "image/png" });
-      const canShareFiles = !!(navigator.canShare && navigator.share && navigator.canShare({ files: [file] }));
-      shareButton.classList.toggle("hidden", !canShareFiles);
+      setPreviewHelp(defaultPreviewHelp(blob));
+      updateShutterState();
     }
 
     function hidePreview() {
       preview.classList.add("hidden");
       previewImage.removeAttribute("src");
       captureBlob = null;
+      captureName = "";
+      isPreviewOpen = false;
       revokeCaptureUrl();
+      updateShutterState();
     }
 
     function revokeCaptureUrl() {
@@ -109,6 +122,19 @@
       setStarted,
       setTargetVisible
     };
+
+    function setPreviewHelp(message) {
+      previewHelp.textContent = message;
+    }
+
+    function defaultPreviewHelp(blob) {
+      const file = new File([blob], captureName || captureFileName(), { type: "image/png" });
+      const canShareFiles = !!(navigator.canShare && navigator.share && navigator.canShare({ files: [file] }));
+      if (canShareFiles) {
+        return "บนมือถือ กด Share แล้วเลือก Save Image ได้ หรือส่งต่อไปยังแอปอื่น";
+      }
+      return "กด Download เพื่อบันทึกภาพ PNG";
+    }
   }
 
   async function captureScene({ scene, overlayElement, overlayVideo }) {
@@ -276,17 +302,35 @@
     return Promise.resolve(new Blob([bytes], { type: "image/png" }));
   }
 
-  function downloadBlob(blob) {
+  function downloadBlob(blob, fileName) {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = captureFileName();
+    link.download = fileName || captureFileName();
     link.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
   function captureFileName() {
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    return `ar-capture-${stamp}.png`;
+    const now = new Date();
+    const stamp = [
+      now.getFullYear(),
+      pad2(now.getMonth() + 1),
+      pad2(now.getDate()),
+      "-",
+      pad2(now.getHours()),
+      pad2(now.getMinutes()),
+      pad2(now.getSeconds())
+    ].join("");
+    return `ar-photo-${stamp}.png`;
+  }
+
+  function pad2(value) {
+    return String(value).padStart(2, "0");
+  }
+
+  function friendlyCaptureError(error) {
+    const message = error && error.message ? error.message : "ไม่ทราบสาเหตุ";
+    return `ถ่ายภาพไม่ได้: ${message} ลองขยับกล้องให้เห็น target ชัด ๆ แล้วถ่ายใหม่`;
   }
 })();
