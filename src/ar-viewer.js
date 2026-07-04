@@ -3,7 +3,6 @@
   const library = window.AR_LIBRARY;
   const scene = document.querySelector("a-scene");
   const assetsRoot = document.querySelector("#arAssets");
-  const targetRoot = document.querySelector("#targetRoot");
   const startButton = document.querySelector("#startButton");
   const cameraSwitchButton = document.querySelector("#cameraSwitchButton");
   const statusBox = document.querySelector("#status");
@@ -32,7 +31,7 @@
   }
 
   scene.setAttribute("mindar-image", buildMindARAttribute(config, library));
-  targetStates.forEach(({ entity }) => targetRoot.append(entity));
+  targetStates.forEach(({ entity }) => scene.append(entity));
 
   statusBox.textContent = config.ui.initialText;
   startButton.textContent = config.ui.startButtonText;
