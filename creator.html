@@ -400,6 +400,29 @@
         cursor: pointer;
       }
 
+      .library-header-actions {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .library-trash-button {
+        min-height: 36px;
+        padding: 0 12px;
+        border: 0;
+        border-radius: 8px;
+        background: #ffffff;
+        color: #111111;
+        font: inherit;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .library-trash-button.is-danger {
+        background: #b91c1c;
+        color: #ffffff;
+      }
+
       .library-list {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
@@ -510,6 +533,12 @@
         cursor: pointer;
       }
 
+      .library-card-actions button:disabled {
+        background: #d8d8d8;
+        color: #666666;
+        cursor: not-allowed;
+      }
+
       .library-empty {
         margin: 0;
         padding: 24px;
@@ -598,6 +627,10 @@
           grid-template-columns: 1fr;
         }
 
+        .library-header {
+          align-items: flex-start;
+        }
+
         .library-preview-content {
           grid-template-columns: 1fr;
         }
@@ -623,7 +656,11 @@
       >
         <div class="library-header">
           <h2 id="libraryTitle" class="library-title">Target Library</h2>
-          <button id="libraryCloseButton" class="library-close-button" type="button">Close</button>
+          <div class="library-header-actions">
+            <button id="libraryClearTrashButton" class="library-trash-button is-danger hidden" type="button">Clear all</button>
+            <button id="libraryTrashButton" class="library-trash-button" type="button" aria-label="Deleted targets">Trash</button>
+            <button id="libraryCloseButton" class="library-close-button" type="button">Close</button>
+          </div>
         </div>
         <p id="libraryStatus" class="library-status"></p>
         <div id="libraryList" class="library-list"></div>

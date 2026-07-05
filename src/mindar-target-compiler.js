@@ -262,6 +262,211 @@
     return result;
   }
 
+  async function deleteTargetFromLibrary(targetId) {
+    const currentLibrary = window.AR_LIBRARY;
+    const target = findLibraryTarget(targetId);
+    if (!target) {
+      throw new Error(`Target not found: ${targetId}`);
+    }
+
+    const nextLibrary = buildDeletedLibrary(currentLibrary, targetId);
+    const activeTargets = nextLibrary.targets.filter((item) => item.enabled);
+    if (!activeTargets.length) {
+      throw new Error("Cannot delete the last enabled target in this prototype.");
+    }
+
+    const Compiler = await loadCompiler();
+    const targetImages = [];
+    for (let index = 0; index < activeTargets.length; index++) {
+      const activeTarget = activeTargets[index];
+      setStatus(`Preparing target ${index + 1} of ${activeTargets.length}: ${activeTarget.name}`);
+      targetImages.push(await createCompileImage(await fetchAssetBlob(activeTarget.imagePath)));
+    }
+
+    const compiler = new Compiler();
+    progress.value = 0;
+    progress.classList.remove("hidden");
+    setStatus(`Recompiling ${activeTargets.length} remaining active target${activeTargets.length === 1 ? "" : "s"}...`);
+    await compiler.compileImageTargets(targetImages, (percent) => {
+      progress.value = clampPercent(percent);
+      setStatus(`Recompiling... ${Math.round(progress.value)}%`);
+    });
+
+    const exported = compiler.exportData();
+    const targetsMind = new Blob([exported], { type: "application/octet-stream" });
+    const result = await deleteTargetWithHelper({
+      library: nextLibrary,
+      target,
+      targetsMind
+    });
+
+    window.AR_LIBRARY = result.library;
+    clearCompiledResult();
+    setStatus(`Deleted ${target.name}. Files moved to assets/_deleted for 7 days.`);
+    return result;
+  }
+
+  async function listDeletedTargets() {
+    const response = await fetch("/api/library/deleted-targets", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({})
+    });
+    const result = await response.json();
+    if (!response.ok || !result.ok) {
+      throw new Error(result.error || "helper list deleted targets failed");
+    }
+    return result;
+  }
+
+  async function restoreDeletedTarget(deletedTarget) {
+    const originalTarget = deletedTarget && deletedTarget.originalTarget;
+    if (!originalTarget || !originalTarget.id) {
+      throw new Error("Deleted target metadata is missing.");
+    }
+    if (findLibraryTarget(originalTarget.id)) {
+      throw new Error(`Target already exists in the library: ${originalTarget.id}`);
+    }
+
+    const nextLibrary = buildRestoredLibrary(window.AR_LIBRARY, originalTarget);
+    const activeTargets = nextLibrary.targets.filter((item) => item.enabled);
+    if (activeTargets.length > MAX_ACTIVE_TARGETS) {
+      throw new Error(`This prototype supports up to ${MAX_ACTIVE_TARGETS} active targets.`);
+    }
+
+    const Compiler = await loadCompiler();
+    const targetImages = [];
+    for (let index = 0; index < activeTargets.length; index++) {
+      const activeTarget = activeTargets[index];
+      const imagePath = activeTarget.id === originalTarget.id
+        ? deletedTarget.imagePath
+        : activeTarget.imagePath;
+      setStatus(`Preparing target ${index + 1} of ${activeTargets.length}: ${activeTarget.name}`);
+      targetImages.push(await createCompileImage(await fetchAssetBlob(imagePath)));
+    }
+
+    const compiler = new Compiler();
+    progress.value = 0;
+    progress.classList.remove("hidden");
+    setStatus(`Recompiling ${activeTargets.length} active target${activeTargets.length === 1 ? "" : "s"}...`);
+    await compiler.compileImageTargets(targetImages, (percent) => {
+      progress.value = clampPercent(percent);
+      setStatus(`Recompiling... ${Math.round(progress.value)}%`);
+    });
+
+    const exported = compiler.exportData();
+    const targetsMind = new Blob([exported], { type: "application/octet-stream" });
+    const result = await restoreTargetWithHelper({
+      library: nextLibrary,
+      deletedTarget,
+      targetsMind
+    });
+
+    window.AR_LIBRARY = result.library;
+    clearCompiledResult();
+    setStatus(`Restored ${originalTarget.name || originalTarget.id}. Active targets: ${result.activeTargets}.`);
+    return result;
+  }
+
+  async function clearDeletedTargets() {
+    const response = await fetch("/api/library/clear-deleted-targets", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ confirmationText: "DELETE" })
+    });
+    const result = await response.json();
+    if (!response.ok || !result.ok) {
+      throw new Error(result.error || "helper clear deleted targets failed");
+    }
+    return result;
+  }
+
+  function buildDeletedLibrary(library, targetId) {
+    const targets = (library.targets || []).filter((item) => item.id !== targetId);
+    let activeIndex = 0;
+    targets.forEach((item) => {
+      if (item.enabled) {
+        item.targetIndex = activeIndex;
+        activeIndex += 1;
+      } else {
+        item.targetIndex = null;
+      }
+    });
+
+    return {
+      version: 1,
+      maxActiveTargets: library.maxActiveTargets || MAX_ACTIVE_TARGETS,
+      targetFile: "./assets/targets.mind",
+      targets
+    };
+  }
+
+  function buildRestoredLibrary(library, restoredTarget) {
+    const restored = {
+      ...restoredTarget,
+      enabled: true,
+      updatedAt: new Date().toISOString()
+    };
+    const targets = [...(library.targets || []), restored];
+    let activeIndex = 0;
+    targets.forEach((item) => {
+      if (item.enabled) {
+        item.targetIndex = activeIndex;
+        activeIndex += 1;
+      } else {
+        item.targetIndex = null;
+      }
+    });
+
+    return {
+      version: 1,
+      maxActiveTargets: library.maxActiveTargets || MAX_ACTIVE_TARGETS,
+      targetFile: "./assets/targets.mind",
+      targets
+    };
+  }
+
+  async function deleteTargetWithHelper({ library, target, targetsMind }) {
+    const form = new FormData();
+    form.append("library", JSON.stringify(library));
+    form.append("targetId", target.id);
+    form.append("baseUpdatedAt", target.updatedAt || "");
+    form.append("targetsMind", targetsMind, "targets.mind");
+
+    const response = await fetch("/api/library/delete-target", {
+      method: "POST",
+      body: form
+    });
+    const result = await response.json();
+    if (!response.ok || !result.ok) {
+      throw new Error(result.error || "helper delete failed");
+    }
+    return result;
+  }
+
+  async function restoreTargetWithHelper({ library, deletedTarget, targetsMind }) {
+    const form = new FormData();
+    form.append("library", JSON.stringify(library));
+    form.append("targetId", deletedTarget.targetId);
+    form.append("deletedFolder", deletedTarget.folderName);
+    form.append("targetsMind", targetsMind, "targets.mind");
+
+    const response = await fetch("/api/library/restore-target", {
+      method: "POST",
+      body: form
+    });
+    const result = await response.json();
+    if (!response.ok || !result.ok) {
+      throw new Error(result.error || "helper restore failed");
+    }
+    return result;
+  }
+
+
   async function loadCompiler() {
     if (!compilerLoadPromise) {
       compilerLoadPromise = import(COMPILER_MODULE_URL).then((module) => {
@@ -515,6 +720,10 @@
   }
 
   window.CreatorProjectSetup = {
-    editTarget: startEditingTarget
+    editTarget: startEditingTarget,
+    deleteTarget: deleteTargetFromLibrary,
+    listDeletedTargets,
+    restoreTarget: restoreDeletedTarget,
+    clearDeletedTargets
   };
 })();

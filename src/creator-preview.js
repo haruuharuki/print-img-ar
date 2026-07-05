@@ -18,6 +18,9 @@
   const targetSelect = document.querySelector("#overlayTargetSelect");
   const libraryButton = document.querySelector("#libraryButton");
   const libraryPanel = document.querySelector("#libraryPanel");
+  const libraryTitle = document.querySelector("#libraryTitle");
+  const libraryClearTrashButton = document.querySelector("#libraryClearTrashButton");
+  const libraryTrashButton = document.querySelector("#libraryTrashButton");
   const libraryCloseButton = document.querySelector("#libraryCloseButton");
   const libraryStatus = document.querySelector("#libraryStatus");
   const libraryList = document.querySelector("#libraryList");
@@ -30,6 +33,7 @@
   const video = document.querySelector("#creatorArVideo");
   let overlay = target.querySelector("a-video");
   const controlInputs = new Map();
+  let libraryMode = "targets";
 
   if (!activeTarget) {
     statusBox.textContent = "AR_LIBRARY has no enabled targets.";
@@ -107,6 +111,14 @@
     applySelectedTarget(targetSelect.value, { showStatus: true });
   });
   libraryButton.addEventListener("click", openLibraryPanel);
+  libraryTrashButton.addEventListener("click", () => {
+    if (libraryMode === "trash") {
+      openLibraryPanel();
+      return;
+    }
+    openLibraryTrashPanel();
+  });
+  libraryClearTrashButton.addEventListener("click", clearDeletedTargets);
   libraryCloseButton.addEventListener("click", closeLibraryPanel);
   libraryPreviewCloseButton.addEventListener("click", closeLibraryPreview);
   window.addEventListener("keydown", (event) => {
@@ -132,7 +144,11 @@
   window.addEventListener("ar-library-updated", () => {
     refreshLibraryState();
     if (!libraryPanel.classList.contains("hidden")) {
-      renderLibraryPanel();
+      if (libraryMode === "trash") {
+        openLibraryTrashPanel();
+      } else {
+        renderLibraryPanel();
+      }
     }
   });
 
@@ -147,8 +163,32 @@
   });
 
   function openLibraryPanel() {
+    libraryMode = "targets";
+    libraryTitle.textContent = "Target Library";
+    libraryClearTrashButton.classList.add("hidden");
+    libraryTrashButton.textContent = "Trash";
+    libraryTrashButton.setAttribute("aria-label", "Deleted targets");
     renderLibraryPanel();
     libraryPanel.classList.remove("hidden");
+    libraryCloseButton.focus();
+  }
+
+  async function openLibraryTrashPanel() {
+    libraryMode = "trash";
+    libraryTitle.textContent = "Deleted Targets";
+    libraryClearTrashButton.classList.remove("hidden");
+    libraryTrashButton.textContent = "Library";
+    libraryTrashButton.setAttribute("aria-label", "Back to target library");
+    libraryStatus.textContent = "Loading deleted targets...";
+    libraryList.replaceChildren();
+    libraryPanel.classList.remove("hidden");
+    try {
+      const result = await window.CreatorProjectSetup.listDeletedTargets();
+      renderDeletedTargets(result.deletedTargets || []);
+    } catch (error) {
+      console.error(error);
+      libraryStatus.textContent = `Could not load deleted targets: ${friendlyHelperError(error)}`;
+    }
     libraryCloseButton.focus();
   }
 
@@ -175,6 +215,23 @@
 
     targets.forEach((targetConfig) => {
       libraryList.append(createLibraryCard(targetConfig));
+    });
+  }
+
+  function renderDeletedTargets(deletedTargets) {
+    libraryStatus.textContent = `${deletedTargets.length} deleted target${deletedTargets.length === 1 ? "" : "s"} available to restore`;
+    libraryList.replaceChildren();
+
+    if (!deletedTargets.length) {
+      const empty = document.createElement("p");
+      empty.className = "library-empty";
+      empty.textContent = "Trash is empty.";
+      libraryList.append(empty);
+      return;
+    }
+
+    deletedTargets.forEach((deletedTarget) => {
+      libraryList.append(createDeletedTargetCard(deletedTarget));
     });
   }
 
@@ -229,8 +286,62 @@
     actions.className = "library-card-actions";
     actions.append(
       createLibraryAction("Preview", () => openLibraryPreview(targetConfig)),
-      createLibraryAction("Edit", () => editProjectSetupTarget(targetConfig.id)),
-      createLibraryAction("Adjust", () => adjustOverlayTarget(targetConfig.id))
+      createLibraryAction("Edit", () => editOverlayTarget(targetConfig.id)),
+      createLibraryAction("Delete", () => deleteLibraryTarget(targetConfig))
+    );
+
+    body.append(title, meta, actions);
+    card.append(media, body);
+    return card;
+  }
+
+  function createDeletedTargetCard(deletedTarget) {
+    const targetConfig = deletedTarget.originalTarget || {};
+    const card = document.createElement("article");
+    card.className = "library-card";
+
+    const media = document.createElement("div");
+    media.className = "library-card-media";
+
+    const image = document.createElement("img");
+    image.src = deletedTarget.imagePath || "";
+    image.alt = `${deletedTarget.targetName} deleted target`;
+    image.loading = "lazy";
+
+    const videoPreview = document.createElement("video");
+    videoPreview.src = deletedTarget.overlayPath || "";
+    videoPreview.muted = true;
+    videoPreview.controls = true;
+    videoPreview.preload = "metadata";
+    videoPreview.playsInline = true;
+    videoPreview.addEventListener("play", () => pauseOtherLibraryVideos(videoPreview));
+    media.append(image, videoPreview);
+
+    const body = document.createElement("div");
+    body.className = "library-card-body";
+
+    const title = document.createElement("div");
+    title.className = "library-card-title";
+    const name = document.createElement("h3");
+    name.textContent = deletedTarget.targetName || deletedTarget.targetId;
+    const badge = document.createElement("span");
+    badge.className = "library-badge is-disabled";
+    badge.textContent = "Deleted";
+    title.append(name, badge);
+
+    const meta = document.createElement("div");
+    meta.className = "library-meta";
+    appendMeta(meta, "id", deletedTarget.targetId);
+    appendMeta(meta, "deletedAt", deletedTarget.deletedAt || "none");
+    appendMeta(meta, "expires", deletedTarget.expiresAt || "none");
+    appendMeta(meta, "target image", fileNameFromPath(targetConfig.imagePath));
+    appendMeta(meta, "overlay video", fileNameFromPath(targetConfig.overlayPath));
+
+    const actions = document.createElement("div");
+    actions.className = "library-card-actions";
+    actions.append(
+      createLibraryAction("Preview", () => openDeletedTargetPreview(deletedTarget)),
+      createLibraryAction("Restore", () => restoreDeletedTarget(deletedTarget))
     );
 
     body.append(title, meta, actions);
@@ -244,10 +355,15 @@
     root.append(row);
   }
 
-  function createLibraryAction(label, handler) {
+  function createLibraryAction(label, handler, options = {}) {
     const button = document.createElement("button");
     button.type = "button";
     button.textContent = label;
+    button.disabled = Boolean(options.disabled);
+    if (options.title) {
+      button.title = options.title;
+      button.setAttribute("aria-label", `${label}: ${options.title}`);
+    }
     button.addEventListener("click", handler);
     return button;
   }
@@ -265,6 +381,19 @@
     libraryPreviewCloseButton.focus();
   }
 
+  function openDeletedTargetPreview(deletedTarget) {
+    pauseOtherLibraryVideos(null);
+    libraryPreviewTitle.textContent = `${deletedTarget.targetName || deletedTarget.targetId} preview`;
+    libraryPreviewImage.src = deletedTarget.imagePath || "";
+    libraryPreviewImage.alt = `${deletedTarget.targetName || deletedTarget.targetId} deleted target preview`;
+    libraryPreviewVideo.pause();
+    libraryPreviewVideo.src = deletedTarget.overlayPath || "";
+    libraryPreviewVideo.muted = true;
+    libraryPreviewVideo.load();
+    libraryPreviewModal.classList.remove("hidden");
+    libraryPreviewCloseButton.focus();
+  }
+
   function closeLibraryPreview() {
     libraryPreviewModal.classList.add("hidden");
     libraryPreviewVideo.pause();
@@ -272,23 +401,114 @@
     libraryPreviewVideo.load();
   }
 
-  function editProjectSetupTarget(targetId) {
-    closeLibraryPanel();
-    setActiveTab("setup");
-    if (window.CreatorProjectSetup && window.CreatorProjectSetup.editTarget) {
-      window.CreatorProjectSetup.editTarget(targetId);
-    }
-  }
-
-  function adjustOverlayTarget(targetId) {
+  function editOverlayTarget(targetId) {
     const targetConfig = getLibraryTargets().find((item) => item.id === targetId);
     if (targetConfig && !targetConfig.enabled) {
       statusBox.textContent = `${targetConfig.name} is disabled. Enable it before adjusting overlay preview.`;
       return;
     }
+    if (window.CreatorProjectSetup && window.CreatorProjectSetup.editTarget) {
+      window.CreatorProjectSetup.editTarget(targetId);
+    }
     closeLibraryPanel();
     setActiveTab("adjust");
     applySelectedTarget(targetId, { showStatus: true });
+  }
+
+  async function deleteLibraryTarget(targetConfig) {
+    if (!window.CreatorProjectSetup || !window.CreatorProjectSetup.deleteTarget) {
+      statusBox.textContent = "Delete helper is not ready. Refresh Creator and try again.";
+      return;
+    }
+
+    const confirmed = window.confirm([
+      `Delete ${targetConfig.name}?`,
+      "",
+      "This will remove it from the active library, move its files to assets/_deleted for 7 days, and recompile the remaining targets.",
+      "",
+      `Target image: ${targetConfig.imagePath}`,
+      `Overlay video: ${targetConfig.overlayPath}`
+    ].join("\n"));
+    if (!confirmed) {
+      statusBox.textContent = `Delete cancelled for ${targetConfig.name}.`;
+      return;
+    }
+
+    statusBox.textContent = `Deleting ${targetConfig.name} from local library...`;
+    try {
+      const result = await window.CreatorProjectSetup.deleteTarget(targetConfig.id);
+      window.AR_LIBRARY = result.library;
+      window.dispatchEvent(new CustomEvent("ar-library-updated"));
+      refreshLibraryState();
+      renderLibraryPanel();
+      statusBox.textContent = `Deleted ${targetConfig.name}. Files moved to assets/_deleted for 7 days.`;
+    } catch (error) {
+      console.error(error);
+      statusBox.textContent = `Delete failed for ${targetConfig.name}: ${error.message}`;
+    }
+  }
+
+  async function restoreDeletedTarget(deletedTarget) {
+    if (!window.CreatorProjectSetup || !window.CreatorProjectSetup.restoreTarget) {
+      statusBox.textContent = "Restore helper is not ready. Refresh Creator and try again.";
+      return;
+    }
+
+    const confirmed = window.confirm([
+      `Restore ${deletedTarget.targetName || deletedTarget.targetId}?`,
+      "",
+      "This will move its files back into assets/targets and assets/overlays, add it to the library, and recompile all enabled targets.",
+      "",
+      "Continue?"
+    ].join("\n"));
+    if (!confirmed) {
+      statusBox.textContent = `Restore cancelled for ${deletedTarget.targetName || deletedTarget.targetId}.`;
+      return;
+    }
+
+    statusBox.textContent = `Restoring ${deletedTarget.targetName || deletedTarget.targetId}...`;
+    try {
+      const result = await window.CreatorProjectSetup.restoreTarget(deletedTarget);
+      window.AR_LIBRARY = result.library;
+      window.dispatchEvent(new CustomEvent("ar-library-updated"));
+      refreshLibraryState();
+      await openLibraryTrashPanel();
+      statusBox.textContent = `Restored ${deletedTarget.targetName || deletedTarget.targetId}. Active targets: ${result.activeTargets}.`;
+    } catch (error) {
+      console.error(error);
+      statusBox.textContent = `Restore failed for ${deletedTarget.targetName || deletedTarget.targetId}: ${error.message}`;
+    }
+  }
+
+  async function clearDeletedTargets() {
+    if (!window.CreatorProjectSetup || !window.CreatorProjectSetup.clearDeletedTargets) {
+      statusBox.textContent = "Clear trash helper is not ready. Refresh Creator and try again.";
+      return;
+    }
+
+    const typed = window.prompt([
+      "This permanently deletes every folder in assets/_deleted.",
+      "You will not be able to restore these targets after this.",
+      "",
+      "Type DELETE to permanently clear the trash."
+    ].join("\n"));
+    if (typed !== "DELETE") {
+      statusBox.textContent = "Clear trash cancelled. Type DELETE exactly to clear permanently.";
+      return;
+    }
+
+    libraryClearTrashButton.disabled = true;
+    statusBox.textContent = "Clearing deleted targets permanently...";
+    try {
+      const result = await window.CreatorProjectSetup.clearDeletedTargets();
+      await openLibraryTrashPanel();
+      statusBox.textContent = `Cleared ${result.deletedCount} deleted target folder${result.deletedCount === 1 ? "" : "s"} permanently.`;
+    } catch (error) {
+      console.error(error);
+      statusBox.textContent = `Clear trash failed: ${friendlyHelperError(error)}`;
+    } finally {
+      libraryClearTrashButton.disabled = false;
+    }
   }
 
   function pauseOtherLibraryVideos(currentVideo) {
@@ -828,5 +1048,13 @@
 
   function fileNameFromPath(path) {
     return String(path || "").split("/").pop() || "none";
+  }
+
+  function friendlyHelperError(error) {
+    const message = error && error.message ? error.message : "unknown error";
+    if (/unknown endpoint/i.test(message)) {
+      return "helper is still running old code. Close the run_creator.bat window, run it again, then reopen creator.html.";
+    }
+    return message;
   }
 })();

@@ -1,17 +1,31 @@
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import argparse
+import cgi
+import datetime
 import json
 import math
 import re
+import shutil
 import subprocess
 import sys
+import threading
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "src" / "ar-config.js"
 CONFIG_REPO_PATH = "src/ar-config.js"
+LIBRARY_PATH = ROOT / "src" / "ar-library.js"
+TARGETS_DIR = ROOT / "assets" / "targets"
+OVERLAYS_DIR = ROOT / "assets" / "overlays"
+TARGETS_MIND_PATH = ROOT / "assets" / "targets.mind"
+DELETED_DIR = ROOT / "assets" / "_deleted"
 COMMIT_MESSAGE = "Update AR overlay config"
+MAX_ACTIVE_TARGETS = 10
+MAX_MULTIPART_BYTES = 120 * 1024 * 1024
+DELETED_RETENTION_DAYS = 7
+LIBRARY_DEPLOY_MESSAGE = "feat: deploy multi-target AR library"
+DEPLOY_LOCK = threading.Lock()
 
 NUMBER_RANGES = {
     "width": (0.1, 2.5),
@@ -46,7 +60,7 @@ class CreatorHelperHandler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_OPTIONS(self):
-        if self.path != "/api/deploy-overlay":
+        if self.path not in {"/api/deploy-overlay", "/api/library/save-target", "/api/library/delete-target", "/api/library/deleted-targets", "/api/library/restore-target", "/api/library/clear-deleted-targets", "/api/library/save-overlay", "/api/library/prepare-deploy", "/api/library/deploy"}:
             self.send_error(404)
             return
         self._validate_local_request()
@@ -57,6 +71,150 @@ class CreatorHelperHandler(SimpleHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        if self.path == "/api/library/deploy":
+            try:
+                self._validate_local_request()
+                payload = self._read_json_body()
+                result = deploy_library(payload)
+                self.send_json({"ok": True, **result})
+            except DeployError as error:
+                self.send_json(
+                    {"ok": False, "error": str(error), "details": error.details},
+                    status=error.status,
+                )
+            except Exception as error:
+                self.send_json(
+                    {"ok": False, "error": "Unexpected helper error.", "details": {"message": str(error)}},
+                    status=500,
+                )
+            return
+
+        if self.path == "/api/library/prepare-deploy":
+            try:
+                self._validate_local_request()
+                payload = self._read_json_body()
+                result = prepare_library_deploy(payload)
+                self.send_json({"ok": True, **result})
+            except DeployError as error:
+                self.send_json(
+                    {"ok": False, "error": str(error), "details": error.details},
+                    status=error.status,
+                )
+            except Exception as error:
+                self.send_json(
+                    {"ok": False, "error": "Unexpected helper error.", "details": {"message": str(error)}},
+                    status=500,
+                )
+            return
+
+        if self.path == "/api/library/save-overlay":
+            try:
+                self._validate_local_request()
+                payload = self._read_json_body()
+                result = save_library_overlay(payload)
+                self.send_json({"ok": True, **result})
+            except DeployError as error:
+                self.send_json(
+                    {"ok": False, "error": str(error), "details": error.details},
+                    status=error.status,
+                )
+            except Exception as error:
+                self.send_json(
+                    {"ok": False, "error": "Unexpected helper error.", "details": {"message": str(error)}},
+                    status=500,
+                )
+            return
+
+        if self.path == "/api/library/save-target":
+            try:
+                self._validate_local_request()
+                form = self._read_multipart_body()
+                result = save_library_target(form)
+                self.send_json({"ok": True, **result})
+            except DeployError as error:
+                self.send_json(
+                    {"ok": False, "error": str(error), "details": error.details},
+                    status=error.status,
+                )
+            except Exception as error:
+                self.send_json(
+                    {"ok": False, "error": "Unexpected helper error.", "details": {"message": str(error)}},
+                    status=500,
+                )
+            return
+
+        if self.path == "/api/library/deleted-targets":
+            try:
+                self._validate_local_request()
+                self._read_json_body()
+                result = list_deleted_targets()
+                self.send_json({"ok": True, **result})
+            except DeployError as error:
+                self.send_json(
+                    {"ok": False, "error": str(error), "details": error.details},
+                    status=error.status,
+                )
+            except Exception as error:
+                self.send_json(
+                    {"ok": False, "error": "Unexpected helper error.", "details": {"message": str(error)}},
+                    status=500,
+                )
+            return
+
+        if self.path == "/api/library/delete-target":
+            try:
+                self._validate_local_request()
+                form = self._read_multipart_body()
+                result = delete_library_target(form)
+                self.send_json({"ok": True, **result})
+            except DeployError as error:
+                self.send_json(
+                    {"ok": False, "error": str(error), "details": error.details},
+                    status=error.status,
+                )
+            except Exception as error:
+                self.send_json(
+                    {"ok": False, "error": "Unexpected helper error.", "details": {"message": str(error)}},
+                    status=500,
+                )
+            return
+
+        if self.path == "/api/library/restore-target":
+            try:
+                self._validate_local_request()
+                form = self._read_multipart_body()
+                result = restore_library_target(form)
+                self.send_json({"ok": True, **result})
+            except DeployError as error:
+                self.send_json(
+                    {"ok": False, "error": str(error), "details": error.details},
+                    status=error.status,
+                )
+            except Exception as error:
+                self.send_json(
+                    {"ok": False, "error": "Unexpected helper error.", "details": {"message": str(error)}},
+                    status=500,
+                )
+            return
+
+        if self.path == "/api/library/clear-deleted-targets":
+            try:
+                self._validate_local_request()
+                payload = self._read_json_body()
+                result = clear_deleted_targets(payload)
+                self.send_json({"ok": True, **result})
+            except DeployError as error:
+                self.send_json(
+                    {"ok": False, "error": str(error), "details": error.details},
+                    status=error.status,
+                )
+            except Exception as error:
+                self.send_json(
+                    {"ok": False, "error": "Unexpected helper error.", "details": {"message": str(error)}},
+                    status=500,
+                )
+            return
+
         if self.path != "/api/deploy-overlay":
             self.send_json({"ok": False, "error": "Unknown endpoint."}, status=404)
             return
@@ -88,6 +246,27 @@ class CreatorHelperHandler(SimpleHTTPRequestHandler):
             return json.loads(raw.decode("utf-8"))
         except json.JSONDecodeError as error:
             raise DeployError("Invalid JSON body.", details={"message": str(error)})
+
+    def _read_multipart_body(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        if length <= 0:
+            raise DeployError("Missing multipart body.")
+        if length > MAX_MULTIPART_BYTES:
+            raise DeployError("Request body is too large.", details={"maximumBytes": MAX_MULTIPART_BYTES})
+
+        content_type = self.headers.get("Content-Type", "")
+        if not content_type.startswith("multipart/form-data"):
+            raise DeployError("Expected multipart/form-data.")
+
+        return cgi.FieldStorage(
+            fp=self.rfile,
+            headers=self.headers,
+            environ={
+                "REQUEST_METHOD": "POST",
+                "CONTENT_TYPE": content_type,
+                "CONTENT_LENGTH": str(length),
+            },
+        )
 
     def _validate_local_request(self):
         client_host = self.client_address[0]
@@ -185,6 +364,818 @@ def deploy_overlay(payload):
         "pushOutput": tail_output(push_result.stdout, push_result.stderr),
         "overlay": next_overlay,
     }
+
+
+def save_library_target(form):
+    library = parse_library_json(required_form_text(form, "library"))
+    target_id = required_form_text(form, "targetId")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,48}", target_id):
+        raise DeployError("targetId must be a lowercase slug.", details={"targetId": target_id})
+
+    target = find_target(library, target_id)
+    if not target:
+        raise DeployError("targetId was not found in library payload.", details={"targetId": target_id})
+
+    target_image = required_form_file(form, "targetImage")
+    overlay_video = required_form_file(form, "overlayVideo")
+    targets_mind = required_form_file(form, "targetsMind")
+
+    target_ext = image_extension(target_image.filename)
+    overlay_ext = overlay_extension(overlay_video.filename)
+    if target.get("imagePath") != f"./assets/targets/{target_id}{target_ext}":
+        raise DeployError("library imagePath does not match targetId.", details={"imagePath": target.get("imagePath")})
+    if target.get("overlayPath") != f"./assets/overlays/{target_id}{overlay_ext}":
+        raise DeployError("library overlayPath does not match targetId.", details={"overlayPath": target.get("overlayPath")})
+
+    normalized_library = normalize_library(library)
+
+    TARGETS_DIR.mkdir(parents=True, exist_ok=True)
+    OVERLAYS_DIR.mkdir(parents=True, exist_ok=True)
+    write_uploaded_file(target_image, TARGETS_DIR / f"{target_id}{target_ext}")
+    write_uploaded_file(overlay_video, OVERLAYS_DIR / f"{target_id}{overlay_ext}")
+    write_uploaded_file(targets_mind, TARGETS_MIND_PATH)
+    write_library_js(normalized_library)
+
+    return {
+        "changed": True,
+        "targetId": target_id,
+        "activeTargets": len([target for target in normalized_library["targets"] if target.get("enabled")]),
+        "writtenFiles": [
+            f"assets/targets/{target_id}{target_ext}",
+            f"assets/overlays/{target_id}{overlay_ext}",
+            "assets/targets.mind",
+            "src/ar-library.js",
+        ],
+        "library": normalized_library,
+    }
+
+
+def delete_library_target(form):
+    library = parse_library_json(required_form_text(form, "library"))
+    target_id = required_form_text(form, "targetId")
+    base_updated_at = required_form_text(form, "baseUpdatedAt")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,48}", target_id):
+        raise DeployError("targetId must be a lowercase slug.", details={"targetId": target_id})
+
+    targets_mind = required_form_file(form, "targetsMind")
+    current_library = read_library_js()
+    current_target = find_target(current_library, target_id)
+    if not current_target:
+        raise DeployError("targetId was not found in src/ar-library.js.", status=404, details={"targetId": target_id})
+
+    current_updated_at = str(current_target.get("updatedAt") or "")
+    if current_updated_at != base_updated_at:
+        raise DeployError(
+            "Target changed since Creator loaded. Refresh creator.html before deleting.",
+            status=409,
+            details={
+                "targetId": target_id,
+                "currentUpdatedAt": current_updated_at,
+                "baseUpdatedAt": base_updated_at,
+            },
+        )
+
+    if find_target(library, target_id):
+        raise DeployError("Deleted target is still present in the next library payload.", details={"targetId": target_id})
+
+    normalized_library = normalize_library(library)
+    active_targets = [target for target in normalized_library["targets"] if target.get("enabled")]
+    if not active_targets:
+        raise DeployError("Cannot delete the last enabled target in this prototype.")
+
+    moved_files = move_target_assets_to_deleted(current_target)
+    write_uploaded_file(targets_mind, TARGETS_MIND_PATH)
+    write_library_js(normalized_library)
+
+    return {
+        "changed": True,
+        "targetId": target_id,
+        "activeTargets": len(active_targets),
+        "writtenFiles": [
+            "assets/targets.mind",
+            "src/ar-library.js",
+        ],
+        "movedFiles": moved_files,
+        "library": normalized_library,
+    }
+
+
+def list_deleted_targets():
+    deleted_targets = []
+    if not DELETED_DIR.exists():
+        return {"deletedTargets": deleted_targets}
+
+    for folder in DELETED_DIR.iterdir():
+        if not folder.is_dir():
+            continue
+        try:
+            manifest = read_deleted_manifest(folder.name)
+        except DeployError:
+            continue
+        deleted_targets.append(manifest)
+
+    deleted_targets.sort(key=lambda item: item.get("deletedAt", ""), reverse=True)
+    return {"deletedTargets": deleted_targets}
+
+
+def restore_library_target(form):
+    library = parse_library_json(required_form_text(form, "library"))
+    target_id = required_form_text(form, "targetId")
+    deleted_folder = required_form_text(form, "deletedFolder")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,48}", target_id):
+        raise DeployError("targetId must be a lowercase slug.", details={"targetId": target_id})
+
+    targets_mind = required_form_file(form, "targetsMind")
+    current_library = read_library_js()
+    if find_target(current_library, target_id):
+        raise DeployError("Target already exists in src/ar-library.js.", status=409, details={"targetId": target_id})
+
+    deleted_manifest = read_deleted_manifest(deleted_folder)
+    if deleted_manifest.get("targetId") != target_id:
+        raise DeployError(
+            "Deleted target metadata does not match targetId.",
+            details={"targetId": target_id, "deletedTargetId": deleted_manifest.get("targetId")},
+        )
+
+    restored_target = find_target(library, target_id)
+    if not restored_target:
+        raise DeployError("Restored target is missing from the next library payload.", details={"targetId": target_id})
+
+    normalized_library = normalize_library(library)
+    active_targets = [target for target in normalized_library["targets"] if target.get("enabled")]
+    if not active_targets:
+        raise DeployError("Restored library must contain at least one enabled target.")
+
+    moved_files = restore_target_assets(deleted_manifest)
+    write_uploaded_file(targets_mind, TARGETS_MIND_PATH)
+    write_library_js(normalized_library)
+
+    return {
+        "changed": True,
+        "targetId": target_id,
+        "activeTargets": len(active_targets),
+        "writtenFiles": [
+            "assets/targets.mind",
+            "src/ar-library.js",
+            *moved_files,
+        ],
+        "library": normalized_library,
+    }
+
+
+def clear_deleted_targets(payload):
+    if str(payload.get("confirmationText") or "") != "DELETE":
+        raise DeployError("Type DELETE to permanently clear deleted targets.", status=409)
+
+    deleted_folders = []
+    if not DELETED_DIR.exists():
+        return {"deletedCount": 0, "deletedFolders": deleted_folders}
+
+    for folder in DELETED_DIR.iterdir():
+        if not folder.is_dir():
+            continue
+        manifest_path = folder / "delete-manifest.json"
+        if not manifest_path.exists():
+            continue
+        resolved = folder.resolve()
+        if DELETED_DIR.resolve() not in resolved.parents:
+            raise DeployError("Deleted folder cannot escape assets/_deleted.", details={"path": str(folder)})
+        deleted_folders.append(normalize_repo_path(folder.relative_to(ROOT)))
+
+    for repo_path in deleted_folders:
+        shutil.rmtree(ROOT / repo_path)
+
+    return {
+        "deletedCount": len(deleted_folders),
+        "deletedFolders": deleted_folders,
+    }
+
+
+def save_library_overlay(payload):
+    target_id = str(payload.get("targetId", "")).strip()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,48}", target_id):
+        raise DeployError("targetId must be a lowercase slug.", details={"targetId": target_id})
+
+    next_overlay = overlay_to_library(validate_overlay(payload.get("overlay"), "overlay"))
+    base_updated_at = str(payload.get("baseUpdatedAt") or "")
+    library = read_library_js()
+    target = find_target(library, target_id)
+    if not target:
+        raise DeployError("targetId was not found in src/ar-library.js.", status=404, details={"targetId": target_id})
+
+    current_updated_at = str(target.get("updatedAt") or "")
+    if base_updated_at and current_updated_at != base_updated_at:
+        raise DeployError(
+            "Target changed since Creator loaded. Refresh creator.html before saving.",
+            status=409,
+            details={
+                "targetId": target_id,
+                "currentUpdatedAt": current_updated_at,
+                "baseUpdatedAt": base_updated_at,
+            },
+        )
+
+    target["overlay"] = next_overlay
+    target["updatedAt"] = utc_now()
+    write_library_js(library)
+
+    return {
+        "changed": True,
+        "targetId": target_id,
+        "updatedAt": target["updatedAt"],
+        "writtenFiles": ["src/ar-library.js"],
+        "library": library,
+    }
+
+
+def prepare_library_deploy(payload):
+    library = read_library_js()
+    if payload.get("baseLibraryVersion") != library.get("version"):
+        raise DeployError(
+            "Library version changed since Creator loaded. Refresh creator.html before preparing deploy.",
+            status=409,
+            details={"currentVersion": library.get("version"), "baseLibraryVersion": payload.get("baseLibraryVersion")},
+        )
+
+    check_stale_targets(payload, library)
+    raw_targets = library.get("targets", [])
+    enabled_raw_targets = [target for target in raw_targets if target.get("enabled")]
+    expected_indexes = list(range(len(enabled_raw_targets)))
+    actual_indexes = [target.get("targetIndex") for target in enabled_raw_targets]
+    normalized_library = normalize_library(library)
+    errors = []
+    warnings = []
+    files_to_deploy = ["src/ar-library.js", "assets/targets.mind"]
+    referenced_targets = set()
+    referenced_overlays = set()
+    latest_enabled_image_mtime = None
+    enabled_targets = [target for target in normalized_library["targets"] if target.get("enabled")]
+
+    if not TARGETS_MIND_PATH.exists():
+        errors.append("assets/targets.mind is missing.")
+    elif TARGETS_MIND_PATH.stat().st_size <= 0:
+        errors.append("assets/targets.mind is empty.")
+
+    for target in normalized_library["targets"]:
+        image_repo_path = target["imagePath"][2:]
+        overlay_repo_path = target["overlayPath"][2:]
+        image_path = ROOT / image_repo_path
+        overlay_path = ROOT / overlay_repo_path
+        referenced_targets.add(normalize_repo_path(image_repo_path))
+        referenced_overlays.add(normalize_repo_path(overlay_repo_path))
+        files_to_deploy.extend([normalize_repo_path(image_repo_path), normalize_repo_path(overlay_repo_path)])
+
+        if not image_path.exists():
+            errors.append(f"{target['id']} image file is missing: {target['imagePath']}")
+        elif target.get("enabled"):
+            image_mtime = image_path.stat().st_mtime
+            latest_enabled_image_mtime = image_mtime if latest_enabled_image_mtime is None else max(latest_enabled_image_mtime, image_mtime)
+
+        if not overlay_path.exists():
+            errors.append(f"{target['id']} overlay file is missing: {target['overlayPath']}")
+
+    if actual_indexes != expected_indexes:
+        errors.append(f"Enabled targetIndex values must be {expected_indexes}, got {actual_indexes}.")
+
+    if len(enabled_targets) > int(normalized_library.get("maxActiveTargets", MAX_ACTIVE_TARGETS)):
+        errors.append("Enabled targets exceed maxActiveTargets.")
+
+    if latest_enabled_image_mtime is not None and TARGETS_MIND_PATH.exists() and TARGETS_MIND_PATH.stat().st_size > 0:
+        if TARGETS_MIND_PATH.stat().st_mtime < latest_enabled_image_mtime:
+            errors.append("assets/targets.mind is older than an enabled target image. Recompile active targets before deploy.")
+
+    warnings.extend(orphan_asset_warnings(TARGETS_DIR, referenced_targets, "target image"))
+    warnings.extend(orphan_asset_warnings(OVERLAYS_DIR, referenced_overlays, "overlay"))
+
+    files_to_deploy = sorted(set(files_to_deploy))
+    git_changes = git_working_tree_changes()
+    deploy_set = set(files_to_deploy)
+    unrelated_changes = [change for change in git_changes if change["path"] not in deploy_set]
+
+    return {
+        "ready": not errors,
+        "errors": errors,
+        "filesToDeploy": files_to_deploy,
+        "warnings": warnings,
+        "unrelatedChanges": unrelated_changes,
+        "librarySummary": {
+            "totalTargets": len(normalized_library["targets"]),
+            "enabledTargets": len(enabled_targets),
+        },
+    }
+
+
+def deploy_library(payload):
+    if not DEPLOY_LOCK.acquire(blocking=False):
+        raise DeployError("A library deploy is already running.", status=409)
+
+    committed = False
+    commit_sha = ""
+    files_to_deploy = []
+
+    try:
+        validation = prepare_library_deploy(payload)
+        if not validation["ready"]:
+            raise DeployError("validation failed.", status=409, details={"errors": validation["errors"], "warnings": validation["warnings"]})
+
+        files_to_deploy = validation["filesToDeploy"]
+        confirmed_files = payload.get("confirmedFiles")
+        if not isinstance(confirmed_files, list):
+            raise DeployError("confirmedFiles must be an array.")
+        confirmed_set = {normalize_repo_path(path) for path in confirmed_files}
+        deploy_set = set(files_to_deploy)
+        if confirmed_set != deploy_set:
+            raise DeployError(
+                "confirmedFiles does not match the current deploy file set.",
+                status=409,
+                details={"confirmedFiles": sorted(confirmed_set), "filesToDeploy": files_to_deploy},
+            )
+
+        validate_deploy_paths(files_to_deploy)
+        ensure_library_git_ready()
+
+        if not deploy_set_has_changes(files_to_deploy):
+            return {
+                "deployed": False,
+                "changed": False,
+                "message": "Nothing new to deploy.",
+                "filesDeployed": files_to_deploy,
+                "librarySummary": validation["librarySummary"],
+            }
+
+        run_git(["add", "--", *files_to_deploy])
+        staged = staged_files()
+        if set(staged) != deploy_set:
+            unstage_files(files_to_deploy)
+            raise DeployError(
+                "staged files do not match the deploy file set.",
+                status=409,
+                details={"stagedFiles": staged, "filesToDeploy": files_to_deploy},
+            )
+
+        run_git(["commit", "-m", LIBRARY_DEPLOY_MESSAGE, "--", *files_to_deploy])
+        committed = True
+        commit_sha = run_git(["rev-parse", "HEAD"]).stdout.strip()
+
+        try:
+            run_git(["push", "origin", "main"])
+        except DeployError as error:
+            raise DeployError(
+                "Local commit created but push failed.",
+                status=500,
+                details={"commitSha": commit_sha, "pushError": error.details},
+            )
+
+        return {
+            "deployed": True,
+            "commitSha": commit_sha,
+            "shortCommitSha": commit_sha[:7],
+            "branch": "main",
+            "remote": "origin/main",
+            "filesDeployed": files_to_deploy,
+            "librarySummary": validation["librarySummary"],
+            "message": "Library deployed successfully.",
+        }
+    except Exception:
+        if files_to_deploy and not committed:
+            unstage_files(files_to_deploy)
+        raise
+    finally:
+        DEPLOY_LOCK.release()
+
+
+def validate_deploy_paths(paths):
+    allowed_prefixes = ("assets/targets/", "assets/overlays/")
+    allowed_exact = {"src/ar-library.js", "assets/targets.mind"}
+
+    for path in paths:
+        repo_path = normalize_repo_path(path)
+        if repo_path != path:
+            raise DeployError("Deploy path must use normalized separators.", details={"path": path})
+        if repo_path.startswith("/") or re.match(r"^[A-Za-z]:", repo_path) or ".." in Path(repo_path).parts:
+            raise DeployError("Deploy path cannot escape the repository.", details={"path": path})
+        if repo_path not in allowed_exact and not repo_path.startswith(allowed_prefixes):
+            raise DeployError("Deploy path is outside the library deploy allowlist.", details={"path": path})
+        resolved = (ROOT / repo_path).resolve()
+        if ROOT.resolve() not in resolved.parents:
+            raise DeployError("Deploy path resolves outside the repository.", details={"path": path})
+        if not resolved.exists():
+            raise DeployError("Deploy path does not exist.", details={"path": path})
+
+
+def ensure_library_git_ready():
+    branch = run_git(["branch", "--show-current"]).stdout.strip()
+    if branch != "main":
+        raise DeployError("Refusing to deploy unless the current branch is main.", status=409, details={"branch": branch})
+
+    staged = staged_files()
+    if staged:
+        raise DeployError(
+            "Refusing to deploy while staged changes already exist.",
+            status=409,
+            details={"stagedFiles": staged},
+        )
+
+
+def deploy_set_has_changes(paths):
+    for path in paths:
+        if not is_tracked(path):
+            return True
+    result = subprocess.run(
+        ["git", "diff", "--quiet", "--", *paths],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 1:
+        return True
+    if result.returncode == 0:
+        return False
+    raise DeployError(
+        "git diff failed.",
+        status=500,
+        details={"stdout": result.stdout, "stderr": result.stderr, "returncode": result.returncode},
+    )
+
+
+def unstage_files(paths):
+    if not paths:
+        return
+    result = subprocess.run(["git", "restore", "--staged", "--", *paths], cwd=ROOT, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise DeployError(
+            "git restore --staged failed.",
+            status=500,
+            details={"stdout": result.stdout, "stderr": result.stderr, "returncode": result.returncode},
+        )
+
+
+def check_stale_targets(payload, library):
+    base_states = payload.get("baseTargetStates")
+    if not isinstance(base_states, list):
+        raise DeployError("baseTargetStates must be an array.")
+
+    current_targets = {target.get("id"): str(target.get("updatedAt") or "") for target in library.get("targets", [])}
+    base_ids = [str(state.get("id", "")).strip() for state in base_states if isinstance(state, dict)]
+    if set(base_ids) != set(current_targets):
+        raise DeployError(
+            "Library targets changed since Creator loaded. Refresh creator.html before preparing deploy.",
+            status=409,
+            details={"currentTargetIds": sorted(current_targets), "baseTargetIds": sorted(base_ids)},
+        )
+
+    for state in base_states:
+        if not isinstance(state, dict):
+            raise DeployError("Each baseTargetStates item must be an object.")
+        target_id = str(state.get("id", "")).strip()
+        if target_id not in current_targets:
+            raise DeployError("Target changed since Creator loaded. Refresh creator.html before preparing deploy.", status=409, details={"targetId": target_id})
+        base_updated_at = str(state.get("updatedAt") or "")
+        if current_targets[target_id] != base_updated_at:
+            raise DeployError(
+                "Target changed since Creator loaded. Refresh creator.html before preparing deploy.",
+                status=409,
+                details={"targetId": target_id, "currentUpdatedAt": current_targets[target_id], "baseUpdatedAt": base_updated_at},
+            )
+
+
+def orphan_asset_warnings(directory, referenced_paths, label):
+    if not directory.exists():
+        return []
+
+    warnings = []
+    for path in directory.iterdir():
+        if not path.is_file():
+            continue
+        repo_path = normalize_repo_path(path.relative_to(ROOT))
+        if repo_path not in referenced_paths:
+            warnings.append(f"Orphan {label}: {repo_path}")
+    return warnings
+
+
+def git_working_tree_changes():
+    result = run_git(["status", "--porcelain", "--untracked-files=all"])
+    changes = []
+    for line in result.stdout.splitlines():
+        if not line:
+            continue
+        status = line[:2]
+        path = line[3:].strip()
+        if " -> " in path:
+            path = path.split(" -> ", 1)[1]
+        changes.append({"status": status.strip() or status, "path": normalize_repo_path(path)})
+    return changes
+
+
+def normalize_repo_path(path):
+    return str(path).replace("\\", "/")
+
+
+def read_library_js():
+    text = LIBRARY_PATH.read_text(encoding="utf-8")
+    match = re.search(r"window\.AR_LIBRARY\s*=\s*(\{[\s\S]*\})\s*;", text)
+    if not match:
+        raise DeployError("Cannot find window.AR_LIBRARY in src/ar-library.js.", status=500)
+    try:
+        library = json.loads(match.group(1))
+    except json.JSONDecodeError as error:
+        raise DeployError("Invalid JSON in src/ar-library.js.", status=500, details={"message": str(error)})
+    if not isinstance(library, dict) or not isinstance(library.get("targets"), list):
+        raise DeployError("src/ar-library.js must contain a library with targets.", status=500)
+    return library
+
+
+def required_form_text(form, name):
+    field = form[name] if name in form else None
+    if field is None or getattr(field, "file", None) is not None and field.filename:
+        raise DeployError(f"Missing form field: {name}")
+    value = field.value
+    if value is None or value == "":
+        raise DeployError(f"Missing form field: {name}")
+    return value
+
+
+def required_form_file(form, name):
+    field = form[name] if name in form else None
+    if field is None or not getattr(field, "filename", ""):
+        raise DeployError(f"Missing uploaded file: {name}")
+    return field
+
+
+def parse_library_json(text):
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise DeployError("Invalid library JSON.", details={"message": str(error)})
+    if not isinstance(value, dict):
+        raise DeployError("library must be an object.")
+    return value
+
+
+def find_target(library, target_id):
+    for target in library.get("targets", []):
+        if target.get("id") == target_id:
+            return target
+    return None
+
+
+def normalize_library(library):
+    if library.get("version") != 1:
+        raise DeployError("Unsupported library version.", details={"version": library.get("version")})
+    if library.get("targetFile") != "./assets/targets.mind":
+        raise DeployError("library targetFile must be ./assets/targets.mind.")
+    targets = library.get("targets")
+    if not isinstance(targets, list):
+        raise DeployError("library.targets must be an array.")
+
+    seen_ids = set()
+    active_index = 0
+    normalized_targets = []
+    for target in targets:
+        normalized = normalize_target(target)
+        target_id = normalized["id"]
+        if target_id in seen_ids:
+            raise DeployError("Duplicate target id.", details={"targetId": target_id})
+        seen_ids.add(target_id)
+        if normalized["enabled"]:
+            if active_index >= MAX_ACTIVE_TARGETS:
+                raise DeployError("Too many enabled targets.", details={"maximum": MAX_ACTIVE_TARGETS})
+            normalized["targetIndex"] = active_index
+            active_index += 1
+        else:
+            normalized["targetIndex"] = None
+        normalized_targets.append(normalized)
+
+    return {
+        "version": 1,
+        "maxActiveTargets": MAX_ACTIVE_TARGETS,
+        "targetFile": "./assets/targets.mind",
+        "targets": normalized_targets,
+    }
+
+
+def normalize_target(target):
+    if not isinstance(target, dict):
+        raise DeployError("Each target must be an object.")
+    target_id = str(target.get("id", "")).strip()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,48}", target_id):
+        raise DeployError("Invalid target id.", details={"targetId": target_id})
+
+    image_path = validate_asset_path(target.get("imagePath"), "assets/targets/", {".png", ".jpg", ".jpeg", ".webp"})
+    overlay_path = validate_asset_path(target.get("overlayPath"), "assets/overlays/", {".mp4"})
+    overlay = validate_overlay(target.get("overlay"), f"target {target_id} overlay")
+
+    return {
+        "id": target_id,
+        "name": str(target.get("name") or target_id).strip()[:80],
+        "enabled": bool(target.get("enabled", True)),
+        "targetIndex": target.get("targetIndex"),
+        "imagePath": image_path,
+        "overlayPath": overlay_path,
+        "overlayType": "video",
+        "overlay": overlay_to_library(overlay),
+        "video": normalize_video(target.get("video")),
+        "updatedAt": str(target.get("updatedAt") or utc_now()),
+    }
+
+
+def validate_asset_path(value, prefix, extensions):
+    if not isinstance(value, str) or not value.startswith(f"./{prefix}"):
+        raise DeployError("Invalid asset path.", details={"path": value, "prefix": f"./{prefix}"})
+    relative = value[2:]
+    path = Path(relative)
+    if path.is_absolute() or ".." in path.parts:
+        raise DeployError("Asset path cannot escape the repository.", details={"path": value})
+    if path.suffix.lower() not in extensions:
+        raise DeployError("Unsupported asset extension.", details={"path": value, "extensions": sorted(extensions)})
+    return value
+
+
+def image_extension(filename):
+    suffix = Path(filename or "").suffix.lower()
+    if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+        raise DeployError("Target image must be PNG, JPG, or WebP.", details={"filename": filename})
+    return suffix
+
+
+def overlay_extension(filename):
+    suffix = Path(filename or "").suffix.lower()
+    if suffix != ".mp4":
+        raise DeployError("Overlay video must be MP4 for this prototype.", details={"filename": filename})
+    return suffix
+
+
+def normalize_video(value):
+    source = value if isinstance(value, dict) else {}
+    return {
+        "autoplay": bool(source.get("autoplay", True)),
+        "loop": bool(source.get("loop", True)),
+        "muted": bool(source.get("muted", True)),
+        "playsInline": bool(source.get("playsInline", True)),
+    }
+
+
+def overlay_to_library(overlay):
+    return {
+        "width": overlay["width"],
+        "height": overlay["height"],
+        "position": vector_string(overlay["position"]),
+        "rotation": vector_string(overlay["rotation"]),
+    }
+
+
+def write_uploaded_file(field, path):
+    resolved = path.resolve()
+    if ROOT.resolve() not in resolved.parents:
+        raise DeployError("Refusing to write outside repository.", details={"path": str(path)})
+    with resolved.open("wb") as handle:
+        while True:
+            chunk = field.file.read(1024 * 1024)
+            if not chunk:
+                break
+            handle.write(chunk)
+
+
+def move_target_assets_to_deleted(target):
+    deleted_at = utc_now()
+    folder_name = f"{target['id']}-{deleted_at.replace(':', '').replace('-', '').replace('Z', 'Z')}"
+    destination_dir = DELETED_DIR / folder_name
+    destination_dir.mkdir(parents=True, exist_ok=False)
+    moved_files = []
+
+    for key in ("imagePath", "overlayPath"):
+        source = resolve_repo_asset_path(target.get(key))
+        if not source.exists():
+            continue
+        destination = destination_dir / source.name
+        shutil.move(str(source), str(destination))
+        moved_files.append(normalize_repo_path(destination.relative_to(ROOT)))
+
+    metadata = {
+        "targetId": target["id"],
+        "targetName": target.get("name") or target["id"],
+        "deletedAt": deleted_at,
+        "deleteAfterDays": DELETED_RETENTION_DAYS,
+        "originalTarget": target,
+        "movedFiles": moved_files,
+    }
+    metadata_path = destination_dir / "delete-manifest.json"
+    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    moved_files.append(normalize_repo_path(metadata_path.relative_to(ROOT)))
+    return moved_files
+
+
+def read_deleted_manifest(folder_name):
+    folder = resolve_deleted_folder(folder_name)
+    manifest_path = folder / "delete-manifest.json"
+    if not manifest_path.exists():
+        raise DeployError("Deleted target manifest was not found.", status=404, details={"deletedFolder": folder_name})
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise DeployError("Deleted target manifest is invalid.", details={"message": str(error)})
+
+    original_target = manifest.get("originalTarget")
+    if not isinstance(original_target, dict):
+        raise DeployError("Deleted target manifest is missing originalTarget.", details={"deletedFolder": folder_name})
+
+    manifest["folderName"] = folder.name
+    manifest["deletedPath"] = normalize_repo_path(folder.relative_to(ROOT))
+    manifest["imagePath"] = deleted_preview_path(manifest, {".png", ".jpg", ".jpeg", ".webp"})
+    manifest["overlayPath"] = deleted_preview_path(manifest, {".mp4"})
+    manifest["expiresAt"] = deleted_expiry(manifest.get("deletedAt"))
+    return manifest
+
+
+def resolve_deleted_folder(folder_name):
+    name = str(folder_name or "").strip()
+    if not name or Path(name).name != name:
+        raise DeployError("Invalid deleted folder.", details={"deletedFolder": folder_name})
+    folder = (DELETED_DIR / name).resolve()
+    if DELETED_DIR.resolve() not in folder.parents:
+        raise DeployError("Deleted folder cannot escape assets/_deleted.", details={"deletedFolder": folder_name})
+    if not folder.exists() or not folder.is_dir():
+        raise DeployError("Deleted target folder was not found.", status=404, details={"deletedFolder": folder_name})
+    return folder
+
+
+def deleted_preview_path(manifest, extensions):
+    for repo_path in manifest.get("movedFiles", []):
+        path = Path(str(repo_path))
+        if path.suffix.lower() in extensions:
+            return f"./{normalize_repo_path(repo_path)}"
+    return ""
+
+
+def deleted_expiry(deleted_at):
+    try:
+        expires_at = parse_utc_timestamp(str(deleted_at or "")) + datetime.timedelta(days=DELETED_RETENTION_DAYS)
+    except ValueError:
+        return ""
+    return expires_at.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def restore_target_assets(deleted_manifest):
+    folder = resolve_deleted_folder(deleted_manifest["folderName"])
+    original_target = deleted_manifest["originalTarget"]
+    planned_moves = []
+
+    for key in ("imagePath", "overlayPath"):
+        destination = resolve_repo_asset_path(original_target.get(key))
+        source = folder / destination.name
+        if not source.exists():
+            raise DeployError(
+                "Deleted asset file is missing.",
+                status=404,
+                details={"source": normalize_repo_path(source.relative_to(ROOT))},
+            )
+        if destination.exists():
+            raise DeployError(
+                "Refusing to restore because the destination asset already exists.",
+                status=409,
+                details={"destination": normalize_repo_path(destination.relative_to(ROOT))},
+            )
+        planned_moves.append((source, destination))
+
+    moved_files = []
+    for source, destination in planned_moves:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(destination))
+        moved_files.append(normalize_repo_path(destination.relative_to(ROOT)))
+
+    manifest_path = folder / "delete-manifest.json"
+    if manifest_path.exists():
+        manifest_path.unlink()
+    try:
+        folder.rmdir()
+    except OSError:
+        pass
+
+    return moved_files
+
+
+def resolve_repo_asset_path(value):
+    if not isinstance(value, str) or not value.startswith("./assets/"):
+        raise DeployError("Invalid target asset path.", details={"path": value})
+    relative = Path(value[2:])
+    if relative.is_absolute() or ".." in relative.parts:
+        raise DeployError("Asset path cannot escape the repository.", details={"path": value})
+    resolved = (ROOT / relative).resolve()
+    if ROOT.resolve() not in resolved.parents:
+        raise DeployError("Asset path resolves outside repository.", details={"path": value})
+    return resolved
+
+
+def write_library_js(library):
+    text = "(function () {\n  window.AR_LIBRARY = "
+    text += json.dumps(library, ensure_ascii=False, indent=2)
+    text += ";\n})();\n"
+    LIBRARY_PATH.write_text(text, encoding="utf-8")
+
+
+def utc_now():
+    return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def validate_overlay(value, label):
@@ -386,6 +1377,40 @@ def tail_output(stdout, stderr):
     return "\n".join(lines[-20:])
 
 
+def cleanup_expired_deleted_assets():
+    if not DELETED_DIR.exists():
+        return []
+
+    deleted_paths = []
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for folder in DELETED_DIR.iterdir():
+        if not folder.is_dir():
+            continue
+        manifest_path = folder / "delete-manifest.json"
+        if not manifest_path.exists():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            deleted_at = parse_utc_timestamp(str(manifest.get("deletedAt") or ""))
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+        age = now - deleted_at
+        if age.days < DELETED_RETENTION_DAYS:
+            continue
+
+        shutil.rmtree(folder)
+        deleted_paths.append(normalize_repo_path(folder.relative_to(ROOT)))
+
+    return deleted_paths
+
+
+def parse_utc_timestamp(value):
+    if not value.endswith("Z"):
+        raise ValueError("timestamp must end with Z")
+    return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Local creator helper for Print Image AR Starter.")
     parser.add_argument("--host", default="127.0.0.1")
@@ -394,6 +1419,10 @@ def main():
 
     if args.host != "127.0.0.1":
         raise SystemExit("creator_helper.py only supports --host 127.0.0.1")
+
+    removed_deleted_assets = cleanup_expired_deleted_assets()
+    for path in removed_deleted_assets:
+        print(f"Removed expired deleted asset folder: {path}")
 
     server = ThreadingHTTPServer((args.host, args.port), CreatorHelperHandler)
     print(f"Creator helper running at http://{args.host}:{args.port}/creator.html")

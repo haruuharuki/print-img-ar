@@ -1,6 +1,6 @@
 # Print-to-AR Creator Handoff Statement
 
-Last updated: 2026-07-04
+Last updated: 2026-07-05
 
 ## Project
 
@@ -30,6 +30,7 @@ Last updated: 2026-07-04
 - `src/creator-preview.js` handles Creator preview, per-target Overlay Adjust, Target Library Browser, and Save & Deploy Library UI.
 - `src/mindar-target-compiler.js` handles Project Setup target image/video selection, browser compile, and save target to library.
 - `tools/creator_helper.py` serves the local static site and helper APIs.
+- `run_creator.bat` starts the local helper first, waits briefly, then opens `creator.html`.
 - `src/ar-config.js` stores global UI/tracking settings, not per-target overlay transforms.
 - `src/ar-library.js` stores target entries, paths, targetIndex, enabled status, and overlay transforms.
 
@@ -63,6 +64,11 @@ The library currently has two enabled targets:
 - Save & Deploy Library validates/stages/commits/pushes only the library deploy set when the user confirms.
 - Target Library Browser v1 exists in Creator.
 - Task 5A.1 compacted the Library Browser layout so cards do not stretch into huge white panels.
+- Task 5B merged Library `Edit` and `Adjust`: `Edit` now opens Overlay Adjust for the selected target.
+- Task 5C added soft delete: `Delete` removes a target from the active library, recompiles remaining enabled targets, and moves deleted assets to `assets/_deleted/` for 7 days.
+- Task 5D added Library Trash: deleted targets can be previewed and restored from `assets/_deleted/`.
+- Trash `Clear all` permanently deletes deleted target folders only after the user types `DELETE`.
+- Nuwa was soft-deleted during testing and restored successfully; the active library currently contains both Vicky and Nuwa.
 
 ## Target Library Browser v1
 
@@ -83,16 +89,20 @@ It shows:
 Actions:
 
 - `Preview`: opens a preview modal with target image and overlay video.
-- `Edit`: switches to Project Setup and loads the target into edit mode.
-- `Adjust`: switches to Overlay Adjust and selects the target.
+- `Edit`: switches to Overlay Adjust and selects the target so the lower controls load its current overlay values.
+- `Delete`: confirms deletion, recompiles remaining enabled targets, writes a new `assets/targets.mind`, removes the target from `src/ar-library.js`, and moves its target/overlay assets into `assets/_deleted/<target-id>-<timestamp>/`.
+- `Trash`: opens deleted target folders found in `assets/_deleted/`.
+- `Restore`: moves a deleted target image/video back into `assets/targets/` and `assets/overlays/`, adds the target back to `src/ar-library.js`, and recompiles all enabled targets.
+- `Clear all`: permanently removes deleted target folders after exact `DELETE` confirmation.
 
 Current limits:
 
-- No delete target.
 - No enable/disable target.
 - No reorder targetIndex.
 - No Library UI recompile button.
-- Edit mode does not auto-fill file inputs because browsers forbid that. It shows existing filenames and requires selecting new files only when replacing assets.
+- Replacing target image/video still happens through Project Setup, not the Library card `Edit` button.
+- Deleted assets are retained locally for 7 days. The helper cleans expired folders the next time it starts.
+- Restore requires the local helper to be restarted after code updates because Python keeps old endpoint code in memory while running.
 
 ## Save And Deploy Library
 
@@ -101,6 +111,10 @@ The Creator Save & Deploy Library flow should not use the old `/api/deploy-overl
 Current helper endpoints:
 
 - `POST /api/library/save-target`
+- `POST /api/library/delete-target`
+- `POST /api/library/deleted-targets`
+- `POST /api/library/restore-target`
+- `POST /api/library/clear-deleted-targets`
 - `POST /api/library/save-overlay`
 - `POST /api/library/prepare-deploy`
 - `POST /api/library/deploy`
@@ -125,9 +139,9 @@ It must not automatically include Creator source files unless the user is commit
 
 ## Recommended Next Tasks
 
-1. Smoke test Target Library Browser on desktop and narrow viewport.
-2. Commit any remaining helper changes separately if they are still intended.
-3. Add Library UI v2 later: enable/disable, delete, replace asset from library card, and recompile all enabled targets.
+1. Smoke test Trash restore/clear all on desktop with a disposable target.
+2. Smoke test production viewer after push: Vicky, Nuwa, and both targets at once.
+3. Add Library UI v2 later: enable/disable, replace asset from library card, and recompile all enabled targets.
 4. Add clearer deploy/status feedback for GitHub Pages cache timing.
 
 ## Useful Checks
