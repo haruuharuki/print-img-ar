@@ -308,6 +308,21 @@
         gap: 8px;
       }
 
+      .optimizer-panel {
+        display: grid;
+        gap: 8px;
+        padding: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.06);
+      }
+
+      .optimizer-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+      }
+
       .actions {
         display: grid;
         grid-template-columns: 1.4fr 1fr 0.8fr;
@@ -589,6 +604,7 @@
         }
 
         .compiler-grid,
+        .optimizer-grid,
         .compiler-actions {
           grid-template-columns: 1fr;
         }
@@ -698,7 +714,7 @@
                 <input id="targetNameInput" type="text" placeholder="Example: Nuwa" />
                 <label class="control-label" for="targetImageInput">Target image</label>
                 <input id="targetImageInput" type="file" accept="image/png,image/jpeg,image/webp" />
-                <p id="compilerStatus" class="compiler-status">Choose a target image and MP4 overlay, then save it into the local library.</p>
+                <p id="compilerStatus" class="compiler-status">Choose a target image and MP4, MOV, or WebM overlay, then save it into the local library.</p>
                 <progress id="compilerProgress" class="hidden" max="100" value="0"></progress>
               </div>
               <div class="compiler-preview">
@@ -708,8 +724,37 @@
             <div class="compiler-grid">
               <div class="control-group">
                 <label class="control-label" for="overlayMediaInput">Overlay video</label>
-                <input id="overlayMediaInput" type="file" accept="video/mp4" />
-                <p id="overlayMediaStatus" class="compiler-status">Choose an MP4 overlay for this target.</p>
+                <input id="overlayMediaInput" type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm" />
+                <p id="overlayMediaStatus" class="compiler-status">Choose an MP4, MOV, or WebM overlay for this target.</p>
+                <section class="optimizer-panel" aria-label="Optimize overlay for AR">
+                  <h3 class="compiler-title">Optimize for AR</h3>
+                  <div class="optimizer-grid">
+                    <label class="control-group" for="optimizerResolution">
+                      <span class="control-label">Resolution</span>
+                      <select id="optimizerResolution" disabled>
+                        <option value="720">720 px</option>
+                        <option value="1080">1080 px</option>
+                      </select>
+                    </label>
+                    <label class="control-group" for="optimizerFrameRate">
+                      <span class="control-label">Frame rate</span>
+                      <select id="optimizerFrameRate" disabled>
+                        <option value="30">30 fps</option>
+                        <option value="24">24 fps</option>
+                      </select>
+                    </label>
+                    <label class="control-group" for="optimizerQuality">
+                      <span class="control-label">Quality</span>
+                      <select id="optimizerQuality" disabled>
+                        <option value="balanced">Balanced</option>
+                        <option value="small">Small</option>
+                        <option value="high">High</option>
+                      </select>
+                    </label>
+                  </div>
+                  <p id="optimizerStatus" class="compiler-status">Checking FFmpeg...</p>
+                  <button id="optimizeOverlayButton" class="action-button secondary" type="button" disabled>Convert & Preview</button>
+                </section>
               </div>
               <div class="compiler-preview">
                 <img id="overlayImagePreview" class="hidden" alt="Overlay image preview" />

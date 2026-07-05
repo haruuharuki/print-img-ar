@@ -110,6 +110,9 @@
   targetSelect.addEventListener("change", () => {
     applySelectedTarget(targetSelect.value, { showStatus: true });
   });
+  video.addEventListener("error", () => {
+    statusBox.textContent = `This browser could not play ${fileNameFromPath(activeTarget.overlayPath)}. Try a browser that supports this overlay format.`;
+  });
   libraryButton.addEventListener("click", openLibraryPanel);
   libraryTrashButton.addEventListener("click", () => {
     if (libraryMode === "trash") {
@@ -259,6 +262,9 @@
     videoPreview.preload = "metadata";
     videoPreview.playsInline = true;
     videoPreview.addEventListener("play", () => pauseOtherLibraryVideos(videoPreview));
+    videoPreview.addEventListener("error", () => {
+      statusBox.textContent = `This browser could not preview ${fileNameFromPath(targetConfig.overlayPath)}.`;
+    });
 
     media.append(image, videoPreview);
 
@@ -315,6 +321,9 @@
     videoPreview.preload = "metadata";
     videoPreview.playsInline = true;
     videoPreview.addEventListener("play", () => pauseOtherLibraryVideos(videoPreview));
+    videoPreview.addEventListener("error", () => {
+      statusBox.textContent = `This browser could not preview ${fileNameFromPath(deletedTarget.overlayPath)}.`;
+    });
     media.append(image, videoPreview);
 
     const body = document.createElement("div");
@@ -376,6 +385,9 @@
     libraryPreviewVideo.pause();
     libraryPreviewVideo.src = targetConfig.overlayPath;
     libraryPreviewVideo.muted = true;
+    libraryPreviewVideo.onerror = () => {
+      statusBox.textContent = `This browser could not preview ${fileNameFromPath(targetConfig.overlayPath)}.`;
+    };
     libraryPreviewVideo.load();
     libraryPreviewModal.classList.remove("hidden");
     libraryPreviewCloseButton.focus();
@@ -389,6 +401,9 @@
     libraryPreviewVideo.pause();
     libraryPreviewVideo.src = deletedTarget.overlayPath || "";
     libraryPreviewVideo.muted = true;
+    libraryPreviewVideo.onerror = () => {
+      statusBox.textContent = `This browser could not preview ${fileNameFromPath(deletedTarget.overlayPath)}.`;
+    };
     libraryPreviewVideo.load();
     libraryPreviewModal.classList.remove("hidden");
     libraryPreviewCloseButton.focus();
@@ -397,6 +412,7 @@
   function closeLibraryPreview() {
     libraryPreviewModal.classList.add("hidden");
     libraryPreviewVideo.pause();
+    libraryPreviewVideo.onerror = null;
     libraryPreviewVideo.removeAttribute("src");
     libraryPreviewVideo.load();
   }
@@ -631,6 +647,7 @@
 
     const nextOverlay = document.createElement("a-video");
     nextOverlay.setAttribute("src", "#creatorArVideo");
+    nextOverlay.setAttribute("material", "transparent: true; alphaTest: 0.01");
     nextTarget.append(nextOverlay);
 
     nextTarget.addEventListener("targetFound", handleTargetFound);

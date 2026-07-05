@@ -3,6 +3,13 @@
   const MAX_TARGET_EDGE = 1200;
   const MAX_TARGET_PIXELS = 1400000;
   const MAX_ACTIVE_TARGETS = 10;
+  const MAX_OVERLAY_FILE_BYTES = 95 * 1024 * 1024;
+  const SUPPORTED_OVERLAY_EXTENSIONS = new Set([".mp4", ".mov", ".webm"]);
+  const OVERLAY_MIME_BY_EXTENSION = {
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm"
+  };
 
   const nameInput = document.querySelector("#targetNameInput");
   const imageInput = document.querySelector("#targetImageInput");
@@ -15,6 +22,11 @@
   const overlayImagePreview = document.querySelector("#overlayImagePreview");
   const overlayVideoPreview = document.querySelector("#overlayVideoPreview");
   const overlayStatus = document.querySelector("#overlayMediaStatus");
+  const optimizerResolution = document.querySelector("#optimizerResolution");
+  const optimizerFrameRate = document.querySelector("#optimizerFrameRate");
+  const optimizerQuality = document.querySelector("#optimizerQuality");
+  const optimizerStatus = document.querySelector("#optimizerStatus");
+  const optimizeButton = document.querySelector("#optimizeOverlayButton");
 
   if (!nameInput || !imageInput || !previewList || !compileButton || !downloadButton || !statusText || !progress) {
     return;
@@ -22,12 +34,16 @@
 
   let selectedImageFile = null;
   let selectedOverlayFile = null;
+  let sourceOverlayFile = null;
   let targetPreviewUrl = null;
   let overlayPreviewUrl = null;
   let compiledMindBlob = null;
   let compiledMindFileName = "targets.mind";
   let compilerLoadPromise = null;
   let editingTargetId = null;
+  let optimizerAvailable = false;
+
+  refreshOptimizerStatus();
 
   imageInput.addEventListener("change", () => {
     const file = imageInput.files && imageInput.files[0];
@@ -53,13 +69,18 @@
       nameInput.value = fileBaseName(file.name);
     }
     renderTargetPreview(file);
-    setStatus(`Target ready: ${file.name}. Choose an MP4 overlay, then save to library.`);
+    setStatus(`Target ready: ${file.name}. Choose an MP4, MOV, or WebM overlay, then save to library.`);
     updateCompileButton();
   });
 
   nameInput.addEventListener("input", updateCompileButton);
 
   if (overlayInput && overlayImagePreview && overlayVideoPreview && overlayStatus) {
+    overlayVideoPreview.addEventListener("error", () => {
+      if (!selectedOverlayFile) return;
+      overlayStatus.textContent = `This browser could not preview ${selectedOverlayFile.name}. The file can still be saved if the target browser supports it.`;
+    });
+
     overlayInput.addEventListener("change", () => {
       const file = overlayInput.files && overlayInput.files[0];
 
@@ -69,8 +90,9 @@
         return;
       }
 
-      if (file.type !== "video/mp4") {
-        overlayStatus.textContent = "Please choose an MP4 overlay video.";
+      const validation = validateOverlayFile(file);
+      if (!validation.ok) {
+        overlayStatus.textContent = validation.message;
         updateCompileButton();
         return;
       }
@@ -83,13 +105,21 @@
       overlayVideoPreview.pause();
       overlayVideoPreview.removeAttribute("src");
 
-      selectedOverlayFile = file;
+      sourceOverlayFile = file;
+      selectedOverlayFile = file.size > MAX_OVERLAY_FILE_BYTES ? null : file;
       overlayPreviewUrl = URL.createObjectURL(file);
       overlayVideoPreview.src = overlayPreviewUrl;
       overlayVideoPreview.classList.remove("hidden");
-      overlayStatus.textContent = `Overlay ready: ${file.name}`;
+      overlayStatus.textContent = file.size > MAX_OVERLAY_FILE_BYTES
+        ? `This overlay is ${formatBytes(file.size)}. Use Convert & Preview to create a deployable WebM before saving.`
+        : overlayStatusMessage(file);
+      updateOptimizerControls();
       updateCompileButton();
     });
+  }
+
+  if (optimizeButton) {
+    optimizeButton.addEventListener("click", optimizeOverlayForPreview);
   }
 
   compileButton.addEventListener("click", async () => {
@@ -178,7 +208,7 @@
     const name = nameInput.value.trim() || fileBaseName(selectedImageFile.name);
     const id = editingTargetId || slugify(name || selectedImageFile.name);
     const imageExt = fileExtension(selectedImageFile.name, ".png");
-    const overlayExt = ".mp4";
+    const overlayExt = fileExtension(selectedOverlayFile.name, ".mp4");
     const existing = (library.targets || []).find((item) => item.id === id);
     const baseOverlay = (existing && existing.overlay) || (library.targets && library.targets[0] && library.targets[0].overlay) || {
       width: 1,
@@ -603,6 +633,7 @@
       editingTargetId || (pendingId && findLibraryTarget(pendingId))
         ? "Update existing target"
         : "Save new target";
+    updateOptimizerControls();
   }
 
   function pendingTargetId() {
@@ -631,6 +662,7 @@
     editingTargetId = target.id;
     selectedImageFile = null;
     selectedOverlayFile = null;
+    sourceOverlayFile = null;
     imageInput.value = "";
     overlayInput.value = "";
     nameInput.value = target.name || target.id;
@@ -641,7 +673,7 @@
       `Editing existing target: ${target.name}. Current image: ${fileNameFromPath(target.imagePath)}. Choose a new target image only if you want to replace it.`
     );
     overlayStatus.textContent =
-      `Current overlay: ${fileNameFromPath(target.overlayPath)}. Choose a new MP4 only if you want to replace it.`;
+      `Current overlay: ${fileNameFromPath(target.overlayPath)}. Choose a new MP4, MOV, or WebM only if you want to replace it.`;
     updateCompileButton();
   }
 
@@ -690,8 +722,52 @@
     return extension ? extension[0].toLowerCase() : fallback;
   }
 
+  function validateOverlayFile(file) {
+    const extension = fileExtension(file.name, "");
+    if (!SUPPORTED_OVERLAY_EXTENSIONS.has(extension)) {
+      return {
+        ok: false,
+        message: "Please choose an MP4, MOV, or WebM overlay video."
+      };
+    }
+    if (file.type && !file.type.startsWith("video/")) {
+      return {
+        ok: false,
+        message: "Please choose a video file: MP4, MOV, or WebM."
+      };
+    }
+    return { ok: true };
+  }
+
+  function overlayStatusMessage(file) {
+    const extension = fileExtension(file.name, "");
+    const mimeType = file.type || OVERLAY_MIME_BY_EXTENSION[extension] || "";
+    const support = canPreviewVideo(mimeType);
+    if (support === "") {
+      return `Overlay saved candidate: ${file.name}. This browser may not preview or play ${extension.toUpperCase()} here; test in the target browser before deploy.`;
+    }
+    return `Overlay ready: ${file.name}`;
+  }
+
+  function canPreviewVideo(mimeType) {
+    if (!mimeType) return "";
+    const probe = document.createElement("video");
+    return probe.canPlayType(mimeType);
+  }
+
   function fileNameFromPath(path) {
     return String(path || "").split("/").pop() || "none";
+  }
+
+  function formatBytes(bytes) {
+    const units = ["B", "KB", "MB", "GB"];
+    let value = Number(bytes) || 0;
+    let unitIndex = 0;
+    while (value >= 1024 && unitIndex < units.length - 1) {
+      value /= 1024;
+      unitIndex += 1;
+    }
+    return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
   }
 
   function slugify(value) {
@@ -717,6 +793,122 @@
       return "internet connection is required the first time the compiler bundle loads.";
     }
     return error && error.message ? error.message : "unknown error";
+  }
+
+  async function refreshOptimizerStatus() {
+    if (!optimizerStatus || !optimizeButton) return;
+    optimizerStatus.textContent = "Checking FFmpeg...";
+
+    try {
+      const response = await fetch("/api/optimizer/status", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({})
+      });
+      const result = await response.json();
+      if (!response.ok || !result.ok) {
+        throw new Error(result.error || "optimizer status failed");
+      }
+
+      optimizerAvailable = Boolean(result.available);
+      optimizerStatus.textContent = optimizerAvailable
+        ? `FFmpeg ready: ${result.ffmpegPath}`
+        : result.installHint;
+    } catch (error) {
+      optimizerAvailable = false;
+      optimizerStatus.textContent = `Optimizer unavailable: ${friendlyOptimizerError(error)}`;
+    } finally {
+      updateOptimizerControls();
+    }
+  }
+
+  function updateOptimizerControls() {
+    if (!optimizeButton) return;
+    const canConfigure = optimizerAvailable && Boolean(sourceOverlayFile);
+    [optimizerResolution, optimizerFrameRate, optimizerQuality].forEach((control) => {
+      if (control) control.disabled = !canConfigure;
+    });
+    optimizeButton.disabled = !canConfigure;
+    optimizeButton.textContent = optimizerAvailable ? "Convert & Preview" : "Convert & Preview";
+  }
+
+  function friendlyOptimizerError(error) {
+    const message = error && error.message ? error.message : "unknown error";
+    if (/unknown endpoint/i.test(message)) {
+      return "restart run_creator.bat so the helper can load the optimizer status endpoint.";
+    }
+    return message;
+  }
+
+  async function optimizeOverlayForPreview() {
+    if (!sourceOverlayFile || !optimizerAvailable) return;
+
+    optimizeButton.disabled = true;
+    compileButton.disabled = true;
+    progress.value = 0;
+    progress.classList.remove("hidden");
+    optimizerStatus.textContent = "Converting overlay with FFmpeg...";
+
+    try {
+      const result = await requestOverlayOptimization();
+      selectedOverlayFile = result.file;
+      revokeOverlayPreviewUrl();
+      overlayPreviewUrl = URL.createObjectURL(result.file);
+      overlayVideoPreview.pause();
+      overlayVideoPreview.src = overlayPreviewUrl;
+      overlayVideoPreview.classList.remove("hidden");
+      overlayVideoPreview.load();
+      overlayStatus.textContent = `Optimized overlay ready: ${result.file.name}`;
+      optimizerStatus.textContent = `Converted ${formatBytes(result.originalSize)} to ${formatBytes(result.optimizedSize)}. Save Target will use the optimized WebM.`;
+    } catch (error) {
+      console.error(error);
+      optimizerStatus.textContent = `Convert failed: ${friendlyOptimizerError(error)}`;
+    } finally {
+      progress.classList.add("hidden");
+      updateCompileButton();
+      updateOptimizerControls();
+    }
+  }
+
+  async function requestOverlayOptimization() {
+    const form = new FormData();
+    form.append("overlayVideo", sourceOverlayFile, sourceOverlayFile.name);
+    form.append("resolution", optimizerResolution.value);
+    form.append("frameRate", optimizerFrameRate.value);
+    form.append("quality", optimizerQuality.value);
+
+    const response = await fetch("/api/optimizer/convert", {
+      method: "POST",
+      body: form
+    });
+
+    if (!response.ok) {
+      let message = "optimizer convert failed";
+      try {
+        const error = await response.json();
+        message = error.error || message;
+      } catch (_error) {
+        message = await response.text();
+      }
+      throw new Error(message);
+    }
+
+    const blob = await response.blob();
+    const fileName = response.headers.get("X-Output-File-Name") || optimizedFileName(sourceOverlayFile.name);
+    if (blob.size > MAX_OVERLAY_FILE_BYTES) {
+      throw new Error(`Optimized file is still ${formatBytes(blob.size)}. Try Small quality or 720 px.`);
+    }
+    return {
+      file: new File([blob], fileName, { type: "video/webm" }),
+      originalSize: Number(response.headers.get("X-Original-Size")) || sourceOverlayFile.size,
+      optimizedSize: Number(response.headers.get("X-Optimized-Size")) || blob.size
+    };
+  }
+
+  function optimizedFileName(fileName) {
+    return `${fileBaseName(fileName)}-optimized.webm`;
   }
 
   window.CreatorProjectSetup = {

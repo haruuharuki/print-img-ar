@@ -151,6 +151,9 @@
     video.toggleAttribute("muted", videoConfig.muted);
     video.toggleAttribute("playsinline", videoConfig.playsInline);
     video.toggleAttribute("webkit-playsinline", videoConfig.playsInline);
+    video.addEventListener("error", () => {
+      statusBox.textContent = `This browser could not play ${fileNameFromPath(target.overlayPath)}. Try a browser that supports this overlay format.`;
+    });
     assetsRoot.append(video);
 
     const entity = document.createElement("a-entity");
@@ -163,6 +166,7 @@
     overlay.setAttribute("height", target.overlay.height);
     overlay.setAttribute("position", target.overlay.position);
     overlay.setAttribute("rotation", target.overlay.rotation);
+    overlay.setAttribute("material", "transparent: true; alphaTest: 0.01");
     entity.append(overlay);
 
     return { target, video, videoConfig, entity, overlay };
@@ -263,5 +267,9 @@
 
   function safeDomId(value) {
     return String(value).replace(/[^a-zA-Z0-9_-]/g, "-");
+  }
+
+  function fileNameFromPath(path) {
+    return String(path || "").split("/").pop() || "overlay video";
   }
 })();

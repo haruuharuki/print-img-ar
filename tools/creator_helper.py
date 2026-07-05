@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 
 
@@ -23,9 +24,11 @@ DELETED_DIR = ROOT / "assets" / "_deleted"
 COMMIT_MESSAGE = "Update AR overlay config"
 MAX_ACTIVE_TARGETS = 10
 MAX_MULTIPART_BYTES = 120 * 1024 * 1024
+MAX_OPTIMIZER_INPUT_BYTES = 2 * 1024 * 1024 * 1024
 DELETED_RETENTION_DAYS = 7
 LIBRARY_DEPLOY_MESSAGE = "feat: deploy multi-target AR library"
 DEPLOY_LOCK = threading.Lock()
+OVERLAY_EXTENSIONS = {".mp4", ".mov", ".webm"}
 
 NUMBER_RANGES = {
     "width": (0.1, 2.5),
@@ -60,7 +63,7 @@ class CreatorHelperHandler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def do_OPTIONS(self):
-        if self.path not in {"/api/deploy-overlay", "/api/library/save-target", "/api/library/delete-target", "/api/library/deleted-targets", "/api/library/restore-target", "/api/library/clear-deleted-targets", "/api/library/save-overlay", "/api/library/prepare-deploy", "/api/library/deploy"}:
+        if self.path not in {"/api/deploy-overlay", "/api/optimizer/status", "/api/optimizer/convert", "/api/library/save-target", "/api/library/delete-target", "/api/library/deleted-targets", "/api/library/restore-target", "/api/library/clear-deleted-targets", "/api/library/save-overlay", "/api/library/prepare-deploy", "/api/library/deploy"}:
             self.send_error(404)
             return
         self._validate_local_request()
@@ -71,6 +74,50 @@ class CreatorHelperHandler(SimpleHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        if self.path == "/api/optimizer/status":
+            try:
+                self._validate_local_request()
+                self._read_json_body()
+                result = optimizer_status()
+                self.send_json({"ok": True, **result})
+            except DeployError as error:
+                self.send_json(
+                    {"ok": False, "error": str(error), "details": error.details},
+                    status=error.status,
+                )
+            except Exception as error:
+                self.send_json(
+                    {"ok": False, "error": "Unexpected helper error.", "details": {"message": str(error)}},
+                    status=500,
+                )
+            return
+
+        if self.path == "/api/optimizer/convert":
+            try:
+                self._validate_local_request()
+                form = self._read_multipart_body(max_bytes=MAX_OPTIMIZER_INPUT_BYTES)
+                result = optimize_overlay_video(form)
+                self.send_binary(
+                    result["data"],
+                    "video/webm",
+                    {
+                        "X-Original-Size": str(result["originalSize"]),
+                        "X-Optimized-Size": str(result["optimizedSize"]),
+                        "X-Output-File-Name": result["fileName"],
+                    },
+                )
+            except DeployError as error:
+                self.send_json(
+                    {"ok": False, "error": str(error), "details": error.details},
+                    status=error.status,
+                )
+            except Exception as error:
+                self.send_json(
+                    {"ok": False, "error": "Unexpected helper error.", "details": {"message": str(error)}},
+                    status=500,
+                )
+            return
+
         if self.path == "/api/library/deploy":
             try:
                 self._validate_local_request()
@@ -247,12 +294,12 @@ class CreatorHelperHandler(SimpleHTTPRequestHandler):
         except json.JSONDecodeError as error:
             raise DeployError("Invalid JSON body.", details={"message": str(error)})
 
-    def _read_multipart_body(self):
+    def _read_multipart_body(self, max_bytes=MAX_MULTIPART_BYTES):
         length = int(self.headers.get("Content-Length", "0"))
         if length <= 0:
             raise DeployError("Missing multipart body.")
-        if length > MAX_MULTIPART_BYTES:
-            raise DeployError("Request body is too large.", details={"maximumBytes": MAX_MULTIPART_BYTES})
+        if length > max_bytes:
+            raise DeployError("Request body is too large.", details={"maximumBytes": max_bytes})
 
         content_type = self.headers.get("Content-Type", "")
         if not content_type.startswith("multipart/form-data"):
@@ -295,6 +342,15 @@ class CreatorHelperHandler(SimpleHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_binary(self, body, content_type, headers=None, status=200):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -364,6 +420,112 @@ def deploy_overlay(payload):
         "pushOutput": tail_output(push_result.stdout, push_result.stderr),
         "overlay": next_overlay,
     }
+
+
+def optimizer_status():
+    ffmpeg_path = shutil.which("ffmpeg")
+    ffprobe_path = shutil.which("ffprobe")
+    available = bool(ffmpeg_path and ffprobe_path)
+    install_hint = (
+        "FFmpeg is not available. Install FFmpeg, add ffmpeg.exe and ffprobe.exe to PATH, "
+        "then restart run_creator.bat."
+    )
+
+    return {
+        "available": available,
+        "ffmpegPath": ffmpeg_path,
+        "ffprobePath": ffprobe_path,
+        "installHint": "FFmpeg is ready for optimizer setup." if available else install_hint,
+    }
+
+
+def optimize_overlay_video(form):
+    status = optimizer_status()
+    if not status["available"]:
+        raise DeployError(status["installHint"], status=409)
+
+    overlay_video = required_form_file(form, "overlayVideo")
+    resolution = optimizer_choice(required_form_text(form, "resolution"), {"720", "1080"}, "resolution")
+    frame_rate = optimizer_choice(required_form_text(form, "frameRate"), {"24", "30"}, "frameRate")
+    quality = optimizer_choice(required_form_text(form, "quality"), {"small", "balanced", "high"}, "quality")
+    source_ext = overlay_extension(overlay_video.filename)
+    output_name = f"{Path(overlay_video.filename or 'overlay').stem}-optimized.webm"
+    crf_by_quality = {
+        "small": "42",
+        "balanced": "34",
+        "high": "28",
+    }
+
+    with tempfile.TemporaryDirectory(prefix="print-ar-optimizer-") as temp_dir:
+        temp_path = Path(temp_dir)
+        input_path = temp_path / f"input{source_ext}"
+        output_path = temp_path / "output.webm"
+        write_temp_upload(overlay_video, input_path)
+
+        vf = f"fps={frame_rate},scale='min({resolution},iw)':-2:flags=lanczos"
+        command = [
+            status["ffmpegPath"],
+            "-y",
+            "-i",
+            str(input_path),
+            "-an",
+            "-vf",
+            vf,
+            "-c:v",
+            "libvpx-vp9",
+            "-pix_fmt",
+            "yuva420p",
+            "-auto-alt-ref",
+            "0",
+            "-b:v",
+            "0",
+            "-crf",
+            crf_by_quality[quality],
+            "-deadline",
+            "good",
+            "-row-mt",
+            "1",
+            str(output_path),
+        ]
+        result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise DeployError(
+                "FFmpeg conversion failed.",
+                status=500,
+                details={"stderr": tail_output(result.stdout, result.stderr), "returncode": result.returncode},
+            )
+        if not output_path.exists() or output_path.stat().st_size <= 0:
+            raise DeployError("FFmpeg did not create an optimized video.", status=500)
+        if output_path.stat().st_size > MAX_MULTIPART_BYTES:
+            raise DeployError(
+                "Optimized video is still too large to save and deploy. Try Small quality or 720 px.",
+                status=413,
+                details={"optimizedSize": output_path.stat().st_size, "maximumBytes": MAX_MULTIPART_BYTES},
+            )
+
+        data = output_path.read_bytes()
+        return {
+            "data": data,
+            "fileName": output_name,
+            "originalSize": input_path.stat().st_size,
+            "optimizedSize": len(data),
+        }
+
+
+def optimizer_choice(value, allowed, label):
+    text = str(value or "").strip()
+    if text not in allowed:
+        raise DeployError(f"Invalid optimizer {label}.", details={"value": value, "allowed": sorted(allowed)})
+    return text
+
+
+def write_temp_upload(field, path):
+    with path.open("wb") as handle:
+        while True:
+            chunk = field.file.read(1024 * 1024)
+            if not chunk:
+                break
+            handle.write(chunk)
 
 
 def save_library_target(form):
@@ -692,6 +854,7 @@ def deploy_library(payload):
             )
 
         validate_deploy_paths(files_to_deploy)
+        unstage_all()
         ensure_library_git_ready()
 
         if not deploy_set_has_changes(files_to_deploy):
@@ -705,13 +868,27 @@ def deploy_library(payload):
 
         run_git(["add", "--", *files_to_deploy])
         staged = staged_files()
-        if set(staged) != deploy_set:
-            unstage_files(files_to_deploy)
+        staged_set = set(staged)
+        unexpected_staged = sorted(staged_set - deploy_set)
+        if unexpected_staged:
+            unstage_all()
             raise DeployError(
                 "staged files do not match the deploy file set.",
                 status=409,
-                details={"stagedFiles": staged, "filesToDeploy": files_to_deploy},
+                details={
+                    "expectedDeploySet": files_to_deploy,
+                    "actualStagedChangedFiles": staged,
+                    "unexpectedStagedFiles": unexpected_staged,
+                },
             )
+        if not staged:
+            return {
+                "deployed": False,
+                "changed": False,
+                "message": "No library changes to deploy.",
+                "filesDeployed": files_to_deploy,
+                "librarySummary": validation["librarySummary"],
+            }
 
         run_git(["commit", "-m", LIBRARY_DEPLOY_MESSAGE, "--", *files_to_deploy])
         committed = True
@@ -738,7 +915,7 @@ def deploy_library(payload):
         }
     except Exception:
         if files_to_deploy and not committed:
-            unstage_files(files_to_deploy)
+            unstage_all()
         raise
     finally:
         DEPLOY_LOCK.release()
@@ -805,6 +982,16 @@ def unstage_files(paths):
     if result.returncode != 0:
         raise DeployError(
             "git restore --staged failed.",
+            status=500,
+            details={"stdout": result.stdout, "stderr": result.stderr, "returncode": result.returncode},
+        )
+
+
+def unstage_all():
+    result = subprocess.run(["git", "restore", "--staged", "--", "."], cwd=ROOT, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise DeployError(
+            "git restore --staged -- . failed.",
             status=500,
             details={"stdout": result.stdout, "stderr": result.stderr, "returncode": result.returncode},
         )
@@ -962,7 +1149,7 @@ def normalize_target(target):
         raise DeployError("Invalid target id.", details={"targetId": target_id})
 
     image_path = validate_asset_path(target.get("imagePath"), "assets/targets/", {".png", ".jpg", ".jpeg", ".webp"})
-    overlay_path = validate_asset_path(target.get("overlayPath"), "assets/overlays/", {".mp4"})
+    overlay_path = validate_asset_path(target.get("overlayPath"), "assets/overlays/", OVERLAY_EXTENSIONS)
     overlay = validate_overlay(target.get("overlay"), f"target {target_id} overlay")
 
     return {
@@ -1000,8 +1187,8 @@ def image_extension(filename):
 
 def overlay_extension(filename):
     suffix = Path(filename or "").suffix.lower()
-    if suffix != ".mp4":
-        raise DeployError("Overlay video must be MP4 for this prototype.", details={"filename": filename})
+    if suffix not in OVERLAY_EXTENSIONS:
+        raise DeployError("Overlay video must be MP4, MOV, or WebM.", details={"filename": filename})
     return suffix
 
 
@@ -1083,7 +1270,7 @@ def read_deleted_manifest(folder_name):
     manifest["folderName"] = folder.name
     manifest["deletedPath"] = normalize_repo_path(folder.relative_to(ROOT))
     manifest["imagePath"] = deleted_preview_path(manifest, {".png", ".jpg", ".jpeg", ".webp"})
-    manifest["overlayPath"] = deleted_preview_path(manifest, {".mp4"})
+    manifest["overlayPath"] = deleted_preview_path(manifest, OVERLAY_EXTENSIONS)
     manifest["expiresAt"] = deleted_expiry(manifest.get("deletedAt"))
     return manifest
 
