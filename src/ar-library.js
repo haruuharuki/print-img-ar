@@ -32,7 +32,7 @@
       "enabled": true,
       "targetIndex": 1,
       "imagePath": "./assets/targets/nuwa.png",
-      "overlayPath": "./assets/overlays/nuwa.mp4",
+      "overlayPath": "./assets/overlays/nuwa.webm",
       "overlayType": "video",
       "overlay": {
         "width": 1.13,
@@ -46,7 +46,7 @@
         "muted": true,
         "playsInline": true
       },
-      "updatedAt": "2026-07-05T12:52:46.823Z"
+      "updatedAt": "2026-07-05T14:33:18.632Z"
     }
   ]
 };
