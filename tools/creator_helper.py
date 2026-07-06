@@ -6,11 +6,13 @@ import datetime
 import json
 import math
 import re
+import secrets
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +31,11 @@ DELETED_RETENTION_DAYS = 7
 LIBRARY_DEPLOY_MESSAGE = "feat: deploy multi-target AR library"
 DEPLOY_LOCK = threading.Lock()
 OVERLAY_EXTENSIONS = {".mp4", ".mov", ".webm"}
+PACKED_CACHE_DIR = Path(tempfile.gettempdir()) / "print-ar-packed-cache"
+PACKED_CACHE_TTL_SECONDS = 15 * 60
+PACKED_DOWNLOADS = {}
+PACKED_DOWNLOAD_LOCK = threading.Lock()
+PACKED_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 
 NUMBER_RANGES = {
     "width": (0.1, 2.5),
@@ -73,6 +80,27 @@ class CreatorHelperHandler(SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        if path.startswith("/api/optimizer/packed/"):
+            try:
+                self._validate_local_request()
+                token = path.rsplit("/", 1)[-1]
+                self._send_packed_download(token)
+            except DeployError as error:
+                self.send_json(
+                    {"ok": False, "error": str(error), "details": error.details},
+                    status=error.status,
+                )
+            except Exception as error:
+                self.send_json(
+                    {"ok": False, "error": "Unexpected helper error.", "details": {"message": str(error)}},
+                    status=500,
+                )
+            return
+
+        super().do_GET()
+
     def do_POST(self):
         if self.path == "/api/optimizer/status":
             try:
@@ -100,11 +128,7 @@ class CreatorHelperHandler(SimpleHTTPRequestHandler):
                 self.send_binary(
                     result["data"],
                     "video/webm",
-                    {
-                        "X-Original-Size": str(result["originalSize"]),
-                        "X-Optimized-Size": str(result["optimizedSize"]),
-                        "X-Output-File-Name": result["fileName"],
-                    },
+                    optimizer_response_headers(result),
                 )
             except DeployError as error:
                 self.send_json(
@@ -354,6 +378,22 @@ class CreatorHelperHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_packed_download(self, token):
+        cleanup_packed_cache()
+        metadata = pop_packed_download(token)
+        path = metadata["path"]
+        if not path.exists() or not path.is_file():
+            raise DeployError("Packed download file was not found.", status=410, details={"token": token})
+
+        body = path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "video/mp4")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Disposition", f'attachment; filename="{metadata["fileName"]}"')
+        self.end_headers()
+        self.wfile.write(body)
+        delete_cached_packed_file(path)
+
 
 def deploy_overlay(payload):
     dry_run = bool(payload.get("dryRun", False))
@@ -439,6 +479,126 @@ def optimizer_status():
     }
 
 
+def optimizer_response_headers(result):
+    headers = {
+        "X-Original-Size": str(result["originalSize"]),
+        "X-Optimized-Size": str(result["optimizedSize"]),
+        "X-Output-File-Name": result["fileName"],
+    }
+    if "packedCreated" in result:
+        headers["X-Packed-Created"] = "true" if result["packedCreated"] else "false"
+    if result.get("packedFileName"):
+        headers["X-Packed-File-Name"] = result["packedFileName"]
+    if result.get("packedRelativePath"):
+        headers["X-Packed-Relative-Path"] = result["packedRelativePath"]
+    if result.get("packedSizeBytes") is not None:
+        headers["X-Packed-Size-Bytes"] = str(result["packedSizeBytes"])
+    if result.get("packedDownloadToken"):
+        headers["X-Packed-Download-Token"] = result["packedDownloadToken"]
+    if result.get("packedDownloadPath"):
+        headers["X-Packed-Download-Path"] = result["packedDownloadPath"]
+    if result.get("packedSkippedReason"):
+        headers["X-Packed-Skipped-Reason"] = result["packedSkippedReason"]
+    if result.get("packedError"):
+        headers["X-Packed-Error"] = result["packedError"]
+    return headers
+
+
+def sanitize_download_filename(filename):
+    name = Path(str(filename or "packed-alpha.mp4")).name
+    name = re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip(" .")
+    if not name:
+        name = "packed-alpha.mp4"
+    if not name.lower().endswith(".mp4"):
+        name = f"{name}.mp4"
+    return name[:120]
+
+
+def cache_packed_download(source_path, download_filename):
+    cleanup_packed_cache()
+    PACKED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_urlsafe(32)
+    while True:
+        with PACKED_DOWNLOAD_LOCK:
+            if token not in PACKED_DOWNLOADS:
+                break
+        token = secrets.token_urlsafe(32)
+
+    cached_path = PACKED_CACHE_DIR / f"{token}.mp4"
+    shutil.copyfile(source_path, cached_path)
+    metadata = {
+        "path": cached_path,
+        "fileName": sanitize_download_filename(download_filename),
+        "createdAt": time.time(),
+        "size": cached_path.stat().st_size,
+    }
+    with PACKED_DOWNLOAD_LOCK:
+        PACKED_DOWNLOADS[token] = metadata
+    return {
+        "token": token,
+        "path": f"/api/optimizer/packed/{token}",
+        "size": metadata["size"],
+    }
+
+
+def pop_packed_download(token):
+    if not PACKED_TOKEN_PATTERN.fullmatch(str(token or "")):
+        raise DeployError("Invalid packed download token.", status=404)
+
+    with PACKED_DOWNLOAD_LOCK:
+        metadata = PACKED_DOWNLOADS.pop(token, None)
+    if not metadata:
+        raise DeployError("Packed download token was not found or was already used.", status=404)
+
+    if time.time() - metadata["createdAt"] > PACKED_CACHE_TTL_SECONDS:
+        delete_cached_packed_file(metadata["path"])
+        raise DeployError("Packed download token expired.", status=410, details={"token": token})
+
+    cached_path = metadata["path"].resolve()
+    cache_root = PACKED_CACHE_DIR.resolve()
+    if cached_path.parent != cache_root or cached_path.name != f"{token}.mp4":
+        delete_cached_packed_file(metadata["path"])
+        raise DeployError("Packed download token resolved to an invalid path.", status=404)
+
+    return metadata
+
+
+def delete_cached_packed_file(path):
+    try:
+        resolved = Path(path).resolve()
+        if resolved.parent == PACKED_CACHE_DIR.resolve() and resolved.exists():
+            resolved.unlink()
+    except OSError:
+        pass
+
+
+def cleanup_packed_cache():
+    now = time.time()
+    expired_paths = []
+    with PACKED_DOWNLOAD_LOCK:
+        expired_tokens = [
+            token
+            for token, metadata in PACKED_DOWNLOADS.items()
+            if now - metadata["createdAt"] > PACKED_CACHE_TTL_SECONDS
+        ]
+        for token in expired_tokens:
+            metadata = PACKED_DOWNLOADS.pop(token, None)
+            if metadata:
+                expired_paths.append(metadata["path"])
+
+    for path in expired_paths:
+        delete_cached_packed_file(path)
+
+    if not PACKED_CACHE_DIR.exists():
+        return
+    for path in PACKED_CACHE_DIR.glob("*.mp4"):
+        try:
+            if now - path.stat().st_mtime > PACKED_CACHE_TTL_SECONDS:
+                delete_cached_packed_file(path)
+        except OSError:
+            pass
+
+
 def optimize_overlay_video(form):
     status = optimizer_status()
     if not status["available"]:
@@ -503,13 +663,163 @@ def optimize_overlay_video(form):
                 details={"optimizedSize": output_path.stat().st_size, "maximumBytes": MAX_MULTIPART_BYTES},
             )
 
+        packed_result = {
+            "packedCreated": False,
+            "packedFileName": None,
+            "packedRelativePath": None,
+            "packedSizeBytes": None,
+            "packedDownloadToken": None,
+            "packedDownloadPath": None,
+            "packedSkippedReason": None,
+            "packedError": None,
+        }
+        alpha_status = input_alpha_status(input_path, status["ffprobePath"])
+        packed_result["inputHasAlpha"] = alpha_status["hasAlpha"]
+        packed_result["inputPixFmt"] = alpha_status.get("pixFmt")
+        packed_result["inputCodecName"] = alpha_status.get("codecName")
+        if alpha_status["hasAlpha"]:
+            packed_name = packed_alpha_output_name(overlay_video.filename)
+            packed_path = temp_path / packed_name
+            try:
+                packed = create_packed_alpha_mp4(
+                    input_path,
+                    packed_path,
+                    resolution,
+                    frame_rate,
+                    status["ffmpegPath"],
+                    quality,
+                )
+                packed_result.update(
+                    {
+                        "packedCreated": True,
+                        "packedFileName": packed["fileName"],
+                        "packedRelativePath": packed_path.relative_to(temp_path).as_posix(),
+                        "packedSizeBytes": packed["size"],
+                    }
+                )
+                cached = cache_packed_download(packed_path, packed["fileName"])
+                packed_result["packedDownloadToken"] = cached["token"]
+                packed_result["packedDownloadPath"] = cached["path"]
+            except DeployError as error:
+                packed_result["packedError"] = str(error)
+                packed_result["packedErrorDetails"] = error.details
+        else:
+            packed_result["packedSkippedReason"] = alpha_status.get("error") or "Input video stream does not expose an alpha channel."
+
         data = output_path.read_bytes()
         return {
             "data": data,
             "fileName": output_name,
             "originalSize": input_path.stat().st_size,
             "optimizedSize": len(data),
+            **packed_result,
         }
+
+
+def packed_alpha_output_name(filename):
+    return f"{Path(filename or 'overlay').stem}-packed.mp4"
+
+
+def input_alpha_status(input_path, ffprobe_path):
+    command = [
+        ffprobe_path,
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=codec_name,pix_fmt",
+        "-of",
+        "json",
+        str(input_path),
+    ]
+    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+    if result.returncode != 0:
+        return {
+            "hasAlpha": False,
+            "pixFmt": None,
+            "codecName": None,
+            "error": f"Could not verify alpha channel: {tail_output(result.stdout, result.stderr)}",
+        }
+
+    try:
+        metadata = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        return {
+            "hasAlpha": False,
+            "pixFmt": None,
+            "codecName": None,
+            "error": f"Could not parse ffprobe alpha metadata: {error}",
+        }
+
+    streams = metadata.get("streams") or []
+    stream = streams[0] if streams else {}
+    pix_fmt = str(stream.get("pix_fmt") or "").lower()
+    return {
+        "hasAlpha": pix_fmt_has_alpha(pix_fmt),
+        "pixFmt": pix_fmt or None,
+        "codecName": stream.get("codec_name"),
+    }
+
+
+def pix_fmt_has_alpha(pix_fmt):
+    return (
+        pix_fmt.startswith("yuva")
+        or pix_fmt.startswith("gbrap")
+        or pix_fmt in {"rgba", "argb", "bgra", "abgr", "ya8", "ayuv64le", "ayuv64be"}
+    )
+
+
+def create_packed_alpha_mp4(input_path, output_path, resolution, frame_rate, ffmpeg_path, quality="balanced"):
+    crf_by_quality = {
+        "small": "32",
+        "balanced": "26",
+        "high": "20",
+    }
+    scale_filter = f"scale='min({resolution},iw)':-2:flags=lanczos"
+    filter_complex = (
+        f"[0:v]fps={frame_rate},split=2[color_src][alpha_src];"
+        f"[color_src]{scale_filter},format=rgb24[color];"
+        f"[alpha_src]alphaextract,{scale_filter},format=gray[alpha];"
+        "[color][alpha]vstack=inputs=2,format=yuv420p[packed]"
+    )
+    command = [
+        ffmpeg_path,
+        "-y",
+        "-i",
+        str(input_path),
+        "-an",
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        "[packed]",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-crf",
+        crf_by_quality[quality],
+        "-preset",
+        "medium",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise DeployError(
+            "FFmpeg packed alpha conversion failed.",
+            status=500,
+            details={"stderr": tail_output(result.stdout, result.stderr), "returncode": result.returncode},
+        )
+    if not output_path.exists() or output_path.stat().st_size <= 0:
+        raise DeployError("FFmpeg did not create a packed alpha MP4.", status=500)
+    return {
+        "fileName": output_path.name,
+        "path": str(output_path),
+        "size": output_path.stat().st_size,
+        "command": command,
+    }
 
 
 def optimizer_choice(value, allowed, label):
@@ -1608,6 +1918,7 @@ def main():
         raise SystemExit("creator_helper.py only supports --host 127.0.0.1")
 
     removed_deleted_assets = cleanup_expired_deleted_assets()
+    cleanup_packed_cache()
     for path in removed_deleted_assets:
         print(f"Removed expired deleted asset folder: {path}")
 
