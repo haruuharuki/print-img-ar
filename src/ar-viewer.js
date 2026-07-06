@@ -18,6 +18,11 @@
       overlayElement: activeTargetState && activeTargetState.overlay,
       overlayVideo: activeTargetState && activeTargetState.video
     });
+  const live =
+    window.ARLive &&
+    window.ARLive.init({
+      statusBox
+    });
 
   let hasStarted = false;
   let currentFacingMode = "environment";
@@ -45,6 +50,7 @@
 
       hasStarted = true;
       capture && capture.setStarted(true);
+      live && live.setStarted(true);
       cameraSwitchButton.classList.remove("hidden");
       cameraSwitchButton.disabled = false;
       startButton.classList.add("hidden");
@@ -70,6 +76,7 @@
       video.pause();
     });
     capture && capture.setTargetVisible(false);
+    live && live.setTargetVisible(false);
     statusBox.textContent = nextFacingMode === "environment" ? "เธเธณเธฅเธฑเธเธชเธฅเธฑเธเนเธเธเธฅเนเธญเธเธซเธฅเธฑเธ..." : "เธเธณเธฅเธฑเธเธชเธฅเธฑเธเนเธเธเธฅเนเธญเธเธซเธเนเธฒ...";
 
     try {
@@ -98,10 +105,12 @@
     targetState.entity.addEventListener("targetFound", async () => {
       visibleTargetIds.add(targetState.target.id);
       setActiveTarget(targetState);
+      live && live.setActiveTarget(targetState);
+      live && live.setTargetVisibility(targetState, true);
       statusBox.textContent = config.ui.foundText;
       if (!hasStarted) return;
       capture && capture.setTargetVisible(true);
-      if (targetState.videoConfig.autoplay) {
+      if (targetState.videoConfig.autoplay && (!live || live.shouldPlayTargetVideo(targetState))) {
         try {
           await targetState.video.play();
         } catch (error) {
@@ -113,16 +122,20 @@
     targetState.entity.addEventListener("targetLost", () => {
       visibleTargetIds.delete(targetState.target.id);
       targetState.video.pause();
+      live && live.setTargetVisibility(targetState, false);
       statusBox.textContent = config.ui.lostText;
 
       if (!visibleTargetIds.size) {
         setActiveTarget(null);
+        live && live.setActiveTarget(null);
         capture && capture.setTargetVisible(false);
+        live && live.setTargetVisible(false);
         return;
       }
 
       const nextTargetState = targetStates.find((state) => visibleTargetIds.has(state.target.id));
       setActiveTarget(nextTargetState || null);
+      live && live.setActiveTarget(nextTargetState || null);
       capture && capture.setTargetVisible(!!nextTargetState);
     });
   });

@@ -189,6 +189,137 @@
         opacity: 0.45;
       }
 
+      .live-button {
+        position: fixed;
+        z-index: 25;
+        top: max(12px, env(safe-area-inset-top));
+        left: 12px;
+        width: auto;
+        min-width: 72px;
+        height: 44px;
+        padding: 0 14px;
+        border-radius: 999px;
+        background: rgba(0, 0, 0, 0.68);
+        color: #ffffff;
+        font-size: 14px;
+        backdrop-filter: blur(8px);
+      }
+
+      .live-exit-button,
+      .live-delete-button {
+        position: fixed;
+        z-index: 35;
+        top: max(12px, env(safe-area-inset-top));
+        width: auto;
+        min-width: 44px;
+        height: 44px;
+        padding: 0 14px;
+        border-radius: 999px;
+        background: rgba(0, 0, 0, 0.72);
+        color: #ffffff;
+        font-size: 14px;
+        backdrop-filter: blur(8px);
+      }
+
+      .live-exit-button {
+        left: 12px;
+      }
+
+      .live-delete-button {
+        right: 12px;
+      }
+
+      .live-sticker-layer {
+        position: fixed;
+        z-index: 30;
+        inset: 0;
+        overflow: hidden;
+        pointer-events: none;
+      }
+
+      .live-sticker {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: min(58vw, 320px);
+        transform: translate(-50%, -50%) scale(1);
+        transform-origin: center center;
+        touch-action: none;
+        pointer-events: auto;
+        user-select: none;
+      }
+
+      .live-sticker video {
+        display: block;
+        width: 100%;
+        height: auto;
+        pointer-events: none;
+      }
+
+      .live-selection {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        box-sizing: border-box;
+        border: 1px solid rgba(255, 255, 255, 0.78);
+        transform-origin: center center;
+        pointer-events: none;
+      }
+
+      .live-selection-handle {
+        position: absolute;
+        display: grid;
+        place-items: center;
+        width: 42px;
+        height: 42px;
+        padding: 0;
+        border: 2px solid rgba(255, 255, 255, 0.92);
+        border-radius: 50%;
+        background: rgba(0, 0, 0, 0.34);
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+        pointer-events: auto;
+        touch-action: none;
+      }
+
+      .live-selection-resize {
+        right: -21px;
+        bottom: -21px;
+      }
+
+      .live-selection-resize::before {
+        content: "";
+        width: 13px;
+        height: 13px;
+        border-right: 2px solid #ffffff;
+        border-bottom: 2px solid #ffffff;
+      }
+
+      .live-selection-rotate {
+        left: 50%;
+        top: -66px;
+        transform: translateX(-50%);
+      }
+
+      .live-selection-rotate::before {
+        content: "";
+        width: 12px;
+        height: 12px;
+        border: 2px solid #ffffff;
+        border-left-color: transparent;
+        border-radius: 50%;
+      }
+
+      .live-selection-rotate-connector {
+        position: absolute;
+        left: 50%;
+        top: -24px;
+        width: 1px;
+        height: 24px;
+        background: rgba(255, 255, 255, 0.7);
+        transform: translateX(-50%);
+        pointer-events: none;
+      }
+
       .capture-preview {
         position: fixed;
         z-index: 40;
@@ -292,6 +423,11 @@
       disabled
     >↺</button>
 
+    <button id="liveModeButton" class="live-button hidden" type="button" disabled>Live</button>
+    <button id="liveExitButton" class="live-exit-button hidden" type="button">AR</button>
+    <button id="liveDeleteButton" class="live-delete-button hidden" type="button">Delete</button>
+    <div id="liveStickerLayer" class="live-sticker-layer hidden" aria-label="Live sticker layer"></div>
+
     <div id="capturePreview" class="capture-preview hidden" role="dialog" aria-modal="true">
       <img id="captureImage" alt="AR capture preview" />
       <video id="captureVideo" class="hidden" controls playsinline></video>
@@ -319,6 +455,7 @@
     </a-scene>
 
     <script src="./src/ar-capture.js"></script>
+    <script src="./src/ar-live.js"></script>
     <script src="./src/ar-viewer.js"></script>
   </body>
 </html>
