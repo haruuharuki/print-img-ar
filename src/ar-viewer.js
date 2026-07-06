@@ -1,4 +1,6 @@
 (function () {
+  registerPackedAlphaVideoComponent();
+
   const config = window.AR_VIEWER_CONFIG;
   const library = window.AR_LIBRARY;
   const scene = document.querySelector("a-scene");
@@ -10,15 +12,18 @@
   const targetStates = targets.map(createTargetState);
   const visibleTargetIds = new Set();
   let activeTargetState = targetStates[0] || null;
+  let live = null;
   const capture =
     window.ARCapture &&
     window.ARCapture.init({
       scene,
       statusBox,
       overlayElement: activeTargetState && activeTargetState.overlay,
-      overlayVideo: activeTargetState && activeTargetState.video
+      overlayVideo: activeTargetState && activeTargetState.video,
+      overlayUsesPackedAlpha: activeTargetState && activeTargetState.usesPackedAlpha,
+      getLiveCaptureState: () => live && live.getCaptureState ? live.getCaptureState() : null
     });
-  const live =
+  live =
     window.ARLive &&
     window.ARLive.init({
       statusBox
@@ -142,10 +147,103 @@
 
   window.addEventListener("pagehide", restoreGetUserMedia);
 
+  function registerPackedAlphaVideoComponent() {
+    if (!window.AFRAME || !window.THREE) {
+      throw new Error("A-Frame and Three.js are required for packed alpha video.");
+    }
+
+    if (AFRAME.components["packed-alpha-video"]) {
+      return;
+    }
+
+    AFRAME.registerComponent("packed-alpha-video", {
+      schema: {
+        video: { type: "selector" }
+      },
+
+      init() {
+        this.videoTexture = null;
+        this.shaderMaterial = null;
+        this.applyMaterial = this.applyMaterial.bind(this);
+
+        this.el.addEventListener("object3dset", this.applyMaterial);
+        this.applyMaterial();
+      },
+
+      applyMaterial() {
+        const video = this.data.video;
+        const mesh = this.el.getObject3D("mesh");
+
+        if (!video || !mesh || this.shaderMaterial) {
+          return;
+        }
+
+        this.videoTexture = new THREE.VideoTexture(video);
+        this.videoTexture.minFilter = THREE.LinearFilter;
+        this.videoTexture.magFilter = THREE.LinearFilter;
+        this.videoTexture.wrapS = THREE.ClampToEdgeWrapping;
+        this.videoTexture.wrapT = THREE.ClampToEdgeWrapping;
+        this.videoTexture.generateMipmaps = false;
+        this.videoTexture.flipY = false;
+
+        this.shaderMaterial = new THREE.ShaderMaterial({
+          uniforms: {
+            packedMap: { value: this.videoTexture }
+          },
+          vertexShader: [
+            "varying vec2 vUv;",
+            "void main() {",
+            "  vUv = vec2(uv.x, 1.0 - uv.y);",
+            "  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);",
+            "}"
+          ].join("\n"),
+          fragmentShader: [
+            "precision mediump float;",
+            "uniform sampler2D packedMap;",
+            "varying vec2 vUv;",
+            "void main() {",
+            "  vec2 colorUV = vec2(vUv.x, vUv.y * 0.5);",
+            "  vec2 alphaUV = vec2(vUv.x, 0.5 + (vUv.y * 0.5));",
+            "  vec4 colorSample = texture2D(packedMap, colorUV);",
+            "  vec4 alphaSample = texture2D(packedMap, alphaUV);",
+            "  gl_FragColor = vec4(colorSample.rgb, alphaSample.r);",
+            "}"
+          ].join("\n"),
+          transparent: true,
+          depthWrite: false,
+          side: THREE.DoubleSide
+        });
+
+        mesh.material = this.shaderMaterial;
+      },
+
+      remove() {
+        this.el.removeEventListener("object3dset", this.applyMaterial);
+
+        if (this.shaderMaterial) {
+          this.shaderMaterial.dispose();
+        }
+
+        if (this.videoTexture) {
+          this.videoTexture.dispose();
+        }
+
+        this.shaderMaterial = null;
+        this.videoTexture = null;
+      }
+    });
+  }
+
   function createTargetState(target) {
     const safeId = safeDomId(target.id);
     const videoId = `arVideo-${safeId}`;
     const video = document.createElement("video");
+    const usesPackedAlpha =
+      Boolean(target.overlayPackedPath) &&
+      ["auto-alpha", "packed-alpha"].includes(target.overlayMode);
+    const activeOverlayPath = usesPackedAlpha
+      ? target.overlayPackedPath
+      : target.overlayPath;
     const videoConfig = {
       autoplay: target.video && target.video.autoplay !== undefined ? target.video.autoplay : true,
       loop: target.video && target.video.loop !== undefined ? target.video.loop : true,
@@ -155,7 +253,7 @@
 
     video.id = videoId;
     video.preload = "auto";
-    video.src = target.overlayPath;
+    video.src = activeOverlayPath;
     video.loop = videoConfig.loop;
     video.muted = videoConfig.muted;
     video.playsInline = videoConfig.playsInline;
@@ -165,7 +263,7 @@
     video.toggleAttribute("playsinline", videoConfig.playsInline);
     video.toggleAttribute("webkit-playsinline", videoConfig.playsInline);
     video.addEventListener("error", () => {
-      statusBox.textContent = `This browser could not play ${fileNameFromPath(target.overlayPath)}. Try a browser that supports this overlay format.`;
+      statusBox.textContent = `This browser could not play ${fileNameFromPath(activeOverlayPath)}. Try a browser that supports this overlay format.`;
     });
     assetsRoot.append(video);
 
@@ -173,16 +271,29 @@
     entity.id = `imageTarget-${safeId}`;
     entity.setAttribute("mindar-image-target", `targetIndex: ${target.targetIndex}`);
 
-    const overlay = document.createElement("a-video");
-    overlay.setAttribute("src", `#${videoId}`);
+    const overlay = document.createElement(usesPackedAlpha ? "a-plane" : "a-video");
     overlay.setAttribute("width", target.overlay.width);
     overlay.setAttribute("height", target.overlay.height);
     overlay.setAttribute("position", target.overlay.position);
     overlay.setAttribute("rotation", target.overlay.rotation);
-    overlay.setAttribute("material", "transparent: true; alphaTest: 0.01");
+
+    if (usesPackedAlpha) {
+      overlay.setAttribute("packed-alpha-video", `video: #${videoId}`);
+    } else {
+      overlay.setAttribute("src", `#${videoId}`);
+      overlay.setAttribute("material", "transparent: true; alphaTest: 0.01");
+    }
+
     entity.append(overlay);
 
-    return { target, video, videoConfig, entity, overlay };
+    return {
+      target,
+      video,
+      videoConfig,
+      entity,
+      overlay,
+      usesPackedAlpha
+    };
   }
 
   function setActiveTarget(targetState) {
@@ -190,7 +301,8 @@
     if (capture && capture.setActiveOverlay && targetState) {
       capture.setActiveOverlay({
         overlayElement: targetState.overlay,
-        overlayVideo: targetState.video
+        overlayVideo: targetState.video,
+        overlayUsesPackedAlpha: targetState.usesPackedAlpha
       });
     }
   }

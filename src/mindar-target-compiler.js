@@ -34,6 +34,7 @@
 
   let selectedImageFile = null;
   let selectedOverlayFile = null;
+  let selectedPackedOverlayFile = null;
   let sourceOverlayFile = null;
   let targetPreviewUrl = null;
   let overlayPreviewUrl = null;
@@ -107,6 +108,7 @@
 
       sourceOverlayFile = file;
       selectedOverlayFile = file.size > MAX_OVERLAY_FILE_BYTES ? null : file;
+      selectedPackedOverlayFile = null;
       overlayPreviewUrl = URL.createObjectURL(file);
       overlayVideoPreview.src = overlayPreviewUrl;
       overlayVideoPreview.classList.remove("hidden");
@@ -182,6 +184,7 @@
         target,
         targetImage: selectedImageFile,
         overlayVideo: selectedOverlayFile,
+        overlayPackedVideo: selectedPackedOverlayFile,
         targetsMind: compiledMindBlob
       });
 
@@ -224,6 +227,12 @@
       targetIndex: 0,
       imagePath: `./assets/targets/${id}${imageExt}`,
       overlayPath: `./assets/overlays/${id}${overlayExt}`,
+      ...(selectedPackedOverlayFile
+        ? {
+            overlayPackedPath: `./assets/overlays/${id}-packed.mp4`,
+            overlayMode: "auto-alpha"
+          }
+        : {}),
       overlayType: "video",
       overlay: {
         width: Number(baseOverlay.width),
@@ -273,12 +282,26 @@
     };
   }
 
-  async function saveTargetToLibrary({ library, target, targetImage, overlayVideo, targetsMind }) {
+  async function saveTargetToLibrary({
+    library,
+    target,
+    targetImage,
+    overlayVideo,
+    overlayPackedVideo,
+    targetsMind
+  }) {
     const form = new FormData();
     form.append("library", JSON.stringify(library));
     form.append("targetId", target.id);
     form.append("targetImage", targetImage, targetImage.name);
     form.append("overlayVideo", overlayVideo, overlayVideo.name);
+    if (overlayPackedVideo) {
+      form.append(
+        "overlayPackedVideo",
+        overlayPackedVideo,
+        overlayPackedVideo.name
+      );
+    }
     form.append("targetsMind", targetsMind, "targets.mind");
 
     const response = await fetch("/api/library/save-target", {
@@ -662,6 +685,7 @@
     editingTargetId = target.id;
     selectedImageFile = null;
     selectedOverlayFile = null;
+    selectedPackedOverlayFile = null;
     sourceOverlayFile = null;
     imageInput.value = "";
     overlayInput.value = "";
@@ -850,10 +874,12 @@
     progress.value = 0;
     progress.classList.remove("hidden");
     optimizerStatus.textContent = "Converting overlay with FFmpeg...";
+    selectedPackedOverlayFile = null;
 
     try {
       const result = await requestOverlayOptimization();
       selectedOverlayFile = result.file;
+      selectedPackedOverlayFile = result.packedFile;
       revokeOverlayPreviewUrl();
       overlayPreviewUrl = URL.createObjectURL(result.file);
       overlayVideoPreview.pause();
@@ -861,8 +887,18 @@
       overlayVideoPreview.classList.remove("hidden");
       overlayVideoPreview.load();
       overlayStatus.textContent = `Optimized overlay ready: ${result.file.name}`;
-      optimizerStatus.textContent = `Converted ${formatBytes(result.originalSize)} to ${formatBytes(result.optimizedSize)}. Save Target will use the optimized WebM.`;
+
+      const packedMessage = result.packedFile
+        ? ` Packed iPhone fallback ready: ${result.packedFile.name} (${formatBytes(result.packedFile.size)}).`
+        : result.packedSkippedReason
+          ? ` Packed fallback skipped: ${result.packedSkippedReason}`
+          : "";
+
+      optimizerStatus.textContent =
+        `Converted ${formatBytes(result.originalSize)} to ${formatBytes(result.optimizedSize)}. ` +
+        `Save Target will use the optimized WebM.${packedMessage}`;
     } catch (error) {
+      selectedPackedOverlayFile = null;
       console.error(error);
       optimizerStatus.textContent = `Convert failed: ${friendlyOptimizerError(error)}`;
     } finally {
@@ -900,8 +936,57 @@
     if (blob.size > MAX_OVERLAY_FILE_BYTES) {
       throw new Error(`Optimized file is still ${formatBytes(blob.size)}. Try Small quality or 720 px.`);
     }
+
+    const packedCreated = response.headers.get("X-Packed-Created") === "true";
+    const packedDownloadPath = response.headers.get("X-Packed-Download-Path");
+    const packedFileName =
+      response.headers.get("X-Packed-File-Name") ||
+      `${fileBaseName(sourceOverlayFile.name)}-packed.mp4`;
+    const packedSkippedReason = response.headers.get("X-Packed-Skipped-Reason") || "";
+    const packedError = response.headers.get("X-Packed-Error") || "";
+    let packedFile = null;
+
+    if (packedCreated) {
+      if (!packedDownloadPath) {
+        throw new Error("Packed alpha was created, but the helper did not provide a download path.");
+      }
+
+      const packedResponse = await fetch(packedDownloadPath);
+      if (!packedResponse.ok) {
+        let message = `packed alpha download failed (${packedResponse.status})`;
+        try {
+          const error = await packedResponse.json();
+          message = error.error || message;
+        } catch (_error) {
+          const responseText = await packedResponse.text();
+          if (responseText) message = responseText;
+        }
+        throw new Error(message);
+      }
+
+      const packedBlob = await packedResponse.blob();
+      if (!packedBlob.size) {
+        throw new Error("Packed alpha download returned an empty MP4.");
+      }
+      if (packedBlob.size > MAX_OVERLAY_FILE_BYTES) {
+        throw new Error(
+          `Packed alpha file is ${formatBytes(packedBlob.size)}, which exceeds the save limit.`
+        );
+      }
+
+      packedFile = new File(
+        [packedBlob],
+        packedFileName,
+        { type: "video/mp4" }
+      );
+    } else if (packedError) {
+      throw new Error(`Packed alpha conversion failed: ${packedError}`);
+    }
+
     return {
       file: new File([blob], fileName, { type: "video/webm" }),
+      packedFile,
+      packedSkippedReason,
       originalSize: Number(response.headers.get("X-Original-Size")) || sourceOverlayFile.size,
       optimizedSize: Number(response.headers.get("X-Optimized-Size")) || blob.size
     };

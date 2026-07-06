@@ -6,10 +6,11 @@
   function init({ statusBox }) {
     const liveButton = document.querySelector("#liveModeButton");
     const exitButton = document.querySelector("#liveExitButton");
+    const addButton = document.querySelector("#liveAddButton");
     const deleteButton = document.querySelector("#liveDeleteButton");
     const layer = document.querySelector("#liveStickerLayer");
 
-    if (!liveButton || !exitButton || !deleteButton || !layer) {
+    if (!liveButton || !exitButton || !addButton || !deleteButton || !layer) {
       return null;
     }
 
@@ -18,24 +19,33 @@
     let isStarted = false;
     let mode = "attached";
     let isTargetVisible = false;
+    let selectedSticker = null;
     let sticker = null;
     let stickerVideo = null;
+    let stickerCanvas = null;
+    let packedAlphaRenderer = null;
     let translateX = 0;
     let translateY = 0;
     let scale = 1;
     let rotationDegrees = 0;
+    let isFlipped = false;
     let dragStart = null;
     let resizeStart = null;
     let rotateStart = null;
     let selectionBox = null;
     let resizeHandle = null;
     let rotateHandle = null;
+    let duplicateHandle = null;
+    let flipHandle = null;
     let isSelectionVisible = false;
+    let duplicateSequence = 0;
     const visibleTargetStates = new Map();
+    const liveStickers = new Map();
     const pointers = new Map();
 
     liveButton.addEventListener("click", enterLiveMode);
     exitButton.addEventListener("click", exitLiveMode);
+    addButton.addEventListener("click", addAnotherTarget);
     deleteButton.addEventListener("click", deleteSticker);
 
     function setStarted(value) {
@@ -48,7 +58,7 @@
       if (!value) {
         visibleTargetStates.clear();
       }
-      if (mode !== "attached") {
+      if (mode === "live") {
         hideVisibleTargetOverlays();
       }
       updateLiveButton();
@@ -60,6 +70,7 @@
         hideTargetOverlay(targetState);
         return;
       }
+      restoreTargetOverlay(targetState);
       updateLiveButton();
     }
 
@@ -67,37 +78,47 @@
       if (!targetState || !targetState.target) return;
       if (isVisible) {
         visibleTargetStates.set(targetState.target.id, targetState);
+        if (mode === "attached") {
+          restoreTargetOverlay(targetState);
+        }
       } else {
         visibleTargetStates.delete(targetState.target.id);
       }
       isTargetVisible = visibleTargetStates.size > 0;
-      if (mode !== "attached") {
+      if (mode === "live") {
         hideTargetOverlay(targetState);
       }
       updateLiveButton();
     }
 
     async function enterLiveMode() {
-      if (!isStarted || !activeTargetState || mode !== "attached") return;
+      if (!isStarted || mode !== "attached") return;
+
+      const targetStates = visibleTargetStates.size
+        ? [...visibleTargetStates.values()]
+        : activeTargetState
+          ? [activeTargetState]
+          : [];
+      if (!targetStates.length && !liveStickers.size) return;
 
       mode = "live";
-      liveTargetState = activeTargetState;
-      translateX = 0;
-      translateY = 0;
-      scale = 1;
-      rotationDegrees = 0;
       isSelectionVisible = true;
       layer.classList.remove("hidden");
+      setStickerInteractivity(true);
       liveButton.classList.add("hidden");
       exitButton.classList.remove("hidden");
+      addButton.classList.remove("hidden");
       deleteButton.classList.remove("hidden");
       hideVisibleTargetOverlays();
 
       try {
-        await createSticker(liveTargetState);
+        let lastSticker = selectedSticker || [...liveStickers.values()][liveStickers.size - 1] || null;
+        for (const targetState of targetStates) {
+          lastSticker = await ensureSticker(targetState);
+        }
+        selectSticker(lastSticker);
         addViewportListeners();
-        statusBox.textContent = `Live sticker: ${liveTargetState.target.name || liveTargetState.target.id}`;
-        await stickerVideo.play();
+        statusBox.textContent = `${liveStickers.size} Live sticker${liveStickers.size === 1 ? "" : "s"} ready.`;
       } catch (error) {
         console.warn("Live sticker play was blocked", error);
         statusBox.textContent = "Live sticker could not start. Returning to AR viewer.";
@@ -107,68 +128,153 @@
 
     function exitLiveMode() {
       if (mode === "attached") return;
-      syncStickerTimeToAr();
-      removeSticker();
+      syncSelectedStickerTimeToAr();
+      hideSelectionBox();
       removeViewportListeners();
       mode = "attached";
-      liveTargetState = null;
-      layer.classList.add("hidden");
+      layer.classList.toggle("hidden", liveStickers.size === 0);
+      setStickerInteractivity(false);
       exitButton.classList.add("hidden");
+      addButton.classList.add("hidden");
       deleteButton.classList.add("hidden");
       restoreVisibleTargetOverlays();
       updateLiveButton();
       statusBox.textContent = "Back to AR viewer.";
     }
 
-    function deleteSticker() {
+    function addAnotherTarget() {
       if (mode !== "live") return;
-      syncStickerTimeToAr();
-      removeSticker();
-      mode = "removed";
-      deleteButton.classList.add("hidden");
-      statusBox.textContent = "Live sticker removed.";
+      exitLiveMode();
+      statusBox.textContent = "Scan another image, then tap Live to add it.";
     }
 
-    async function createSticker(targetState) {
-      removeSticker();
+    function deleteSticker() {
+      if (mode !== "live") return;
+      const removedTargetId = selectedSticker && selectedSticker.targetState.target.id;
+      removeSelectedSticker();
+      if (liveStickers.size) {
+        selectSticker([...liveStickers.values()][liveStickers.size - 1]);
+        statusBox.textContent = "Live sticker removed.";
+        return;
+      }
 
-      sticker = document.createElement("div");
-      sticker.className = "live-sticker";
-      stickerVideo = document.createElement("video");
-      configureStickerVideo(targetState.video);
-      stickerVideo.setAttribute("playsinline", "");
-      stickerVideo.setAttribute("webkit-playsinline", "");
-      stickerVideo.addEventListener("error", () => {
+      removeViewportListeners();
+      mode = "attached";
+      layer.classList.add("hidden");
+      setStickerInteractivity(false);
+      exitButton.classList.add("hidden");
+      addButton.classList.add("hidden");
+      deleteButton.classList.add("hidden");
+      const removedTarget = removedTargetId && visibleTargetStates.get(removedTargetId);
+      if (removedTarget) showTargetOverlay(removedTarget);
+      restoreVisibleTargetOverlays();
+      updateLiveButton();
+      statusBox.textContent = "Live sticker removed. Back to AR viewer.";
+    }
+
+    async function ensureSticker(
+      targetState,
+      {
+        allowDuplicate = false,
+        sourceRecord = null,
+        initialTransform = null
+      } = {}
+    ) {
+      const existing = allowDuplicate
+        ? null
+        : findStickerForTarget(targetState.target.id);
+
+      if (existing) {
+        return existing;
+      }
+
+      const nextSticker = document.createElement("div");
+      nextSticker.className = "live-sticker";
+      const nextVideo = document.createElement("video");
+      let nextCanvas = null;
+      let nextRenderer = null;
+      if (targetState.usesPackedAlpha) {
+        nextCanvas = document.createElement("canvas");
+        nextCanvas.style.display = "block";
+        nextCanvas.style.width = "100%";
+        nextCanvas.style.height = "auto";
+        nextCanvas.style.pointerEvents = "none";
+        nextVideo.style.display = "none";
+        nextRenderer = createPackedAlphaRenderer(nextVideo, nextCanvas);
+      }
+      configureStickerVideo(nextVideo, targetState.video);
+      nextVideo.setAttribute("playsinline", "");
+      nextVideo.setAttribute("webkit-playsinline", "");
+      nextVideo.addEventListener("error", () => {
         statusBox.textContent = `This browser could not play ${fileNameFromPath(targetState.target.overlayPath)} as a Live sticker.`;
       });
 
-      sticker.append(stickerVideo);
-      layer.append(sticker);
-      createSelectionBox();
-      await syncArTimeToSticker(targetState.video);
+      nextSticker.append(nextVideo);
+      if (nextCanvas) {
+        nextSticker.append(nextCanvas);
+      }
+      layer.append(nextSticker);
+
+      const stickerKey = allowDuplicate
+        ? `${targetState.target.id}::copy::${++duplicateSequence}`
+        : targetState.target.id;
+
+      const record = {
+        stickerKey,
+        targetState,
+        element: nextSticker,
+        video: nextVideo,
+        canvas: nextCanvas,
+        renderer: nextRenderer,
+        translateX: initialTransform ? initialTransform.translateX : 0,
+        translateY: initialTransform ? initialTransform.translateY : 0,
+        scale: initialTransform ? initialTransform.scale : 1,
+        rotationDegrees: initialTransform ? initialTransform.rotationDegrees : 0,
+        isFlipped: initialTransform ? !!initialTransform.isFlipped : false
+      };
+
+      liveStickers.set(stickerKey, record);
+      selectSticker(record);
+      await syncArTimeToSticker(
+        sourceRecord ? sourceRecord.video : targetState.video,
+        nextVideo,
+        !sourceRecord
+      );
+      if (nextRenderer) nextRenderer.drawFrame();
       applyStickerTransform();
-      bindStickerGestures(sticker);
+      bindStickerGestures(nextSticker);
       clampStickerPosition();
-      updateSelectionBox();
+      hideTargetOverlay(targetState);
+      await nextVideo.play();
+      if (nextRenderer) nextRenderer.start();
+      return record;
     }
 
-    function removeSticker() {
+    function removeSelectedSticker() {
+      if (!selectedSticker) return;
+      syncSelectedStickerTimeToAr();
       unbindStickerGestures();
       removeSelectionBox();
       pointers.clear();
       dragStart = null;
       resizeStart = null;
       rotateStart = null;
-      if (stickerVideo) {
-        stickerVideo.pause();
-        stickerVideo.removeAttribute("src");
-        stickerVideo.load();
-        stickerVideo = null;
+      if (selectedSticker.renderer) {
+        selectedSticker.renderer.dispose();
       }
-      if (sticker) {
-        sticker.remove();
-        sticker = null;
+      if (selectedSticker.video) {
+        selectedSticker.video.pause();
+        selectedSticker.video.removeAttribute("src");
+        selectedSticker.video.load();
       }
+      if (selectedSticker.canvas) {
+        selectedSticker.canvas.remove();
+      }
+      if (selectedSticker.element) {
+        selectedSticker.element.remove();
+      }
+      liveStickers.delete(selectedSticker.stickerKey);
+      clearSelectedStickerRefs();
     }
 
     function bindStickerGestures(element) {
@@ -188,6 +294,10 @@
 
     function onPointerDown(event) {
       event.preventDefault();
+      const targetSticker = findStickerByElement(event.currentTarget);
+      if (targetSticker && targetSticker !== selectedSticker) {
+        selectSticker(targetSticker);
+      }
       showSelectionBox();
       try {
         sticker.setPointerCapture(event.pointerId);
@@ -224,6 +334,7 @@
         scale = clamp(dragStart.scale * (nextDistance / dragStart.distance), 0.35, 3);
       }
 
+      saveSelectedStickerTransform();
       clampStickerPosition();
       applyStickerTransform();
       updateSelectionBox();
@@ -278,7 +389,27 @@
       resizeHandle.type = "button";
       resizeHandle.setAttribute("aria-label", "Resize live sticker");
 
-      selectionBox.append(connector, rotateHandle, resizeHandle);
+      duplicateHandle = document.createElement("button");
+      duplicateHandle.className = "live-selection-handle live-selection-duplicate";
+      duplicateHandle.type = "button";
+      duplicateHandle.textContent = "\u29C9";
+      duplicateHandle.setAttribute("aria-label", "Duplicate live sticker");
+      duplicateHandle.setAttribute("title", "Duplicate");
+
+      flipHandle = document.createElement("button");
+      flipHandle.className = "live-selection-handle live-selection-flip";
+      flipHandle.type = "button";
+      flipHandle.textContent = "\u21C6";
+      flipHandle.setAttribute("aria-label", "Flip live sticker horizontally");
+      flipHandle.setAttribute("title", "Flip left and right");
+
+      selectionBox.append(
+        connector,
+        rotateHandle,
+        resizeHandle,
+        duplicateHandle,
+        flipHandle
+      );
       layer.append(selectionBox);
       bindSelectionGestures();
     }
@@ -291,6 +422,8 @@
       }
       resizeHandle = null;
       rotateHandle = null;
+      duplicateHandle = null;
+      flipHandle = null;
       isSelectionVisible = false;
     }
 
@@ -307,6 +440,12 @@
         rotateHandle.addEventListener("pointerup", onRotatePointerEnd);
         rotateHandle.addEventListener("pointercancel", onRotatePointerEnd);
       }
+      if (duplicateHandle) {
+        duplicateHandle.addEventListener("click", duplicateSelectedSticker);
+      }
+      if (flipHandle) {
+        flipHandle.addEventListener("click", flipSelectedSticker);
+      }
     }
 
     function unbindSelectionGestures() {
@@ -321,6 +460,59 @@
         rotateHandle.removeEventListener("pointermove", onRotatePointerMove);
         rotateHandle.removeEventListener("pointerup", onRotatePointerEnd);
         rotateHandle.removeEventListener("pointercancel", onRotatePointerEnd);
+      }
+      if (duplicateHandle) {
+        duplicateHandle.removeEventListener("click", duplicateSelectedSticker);
+      }
+      if (flipHandle) {
+        flipHandle.removeEventListener("click", flipSelectedSticker);
+      }
+    }
+
+    function flipSelectedSticker(event) {
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (mode !== "live" || !selectedSticker) return;
+
+      isFlipped = !isFlipped;
+      applyStickerTransform();
+      updateSelectionBox();
+      statusBox.textContent = isFlipped
+        ? "Live sticker flipped."
+        : "Live sticker restored.";
+    }
+
+    async function duplicateSelectedSticker(event) {
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (mode !== "live" || !selectedSticker) return;
+
+      saveSelectedStickerTransform();
+      const sourceRecord = selectedSticker;
+
+      try {
+        const duplicate = await ensureSticker(sourceRecord.targetState, {
+          allowDuplicate: true,
+          sourceRecord,
+          initialTransform: {
+            translateX: sourceRecord.translateX + 28,
+            translateY: sourceRecord.translateY + 28,
+            scale: sourceRecord.scale,
+            rotationDegrees: sourceRecord.rotationDegrees,
+            isFlipped: sourceRecord.isFlipped
+          }
+        });
+
+        selectSticker(duplicate);
+        clampStickerPosition();
+        applyStickerTransform();
+        updateSelectionBox();
+        statusBox.textContent = "Live sticker duplicated.";
+      } catch (error) {
+        console.warn("Could not duplicate Live sticker", error);
+        statusBox.textContent = "Could not duplicate this Live sticker.";
       }
     }
 
@@ -429,7 +621,9 @@
 
     function applyStickerTransform() {
       if (!sticker) return;
-      sticker.style.transform = `translate(calc(-50% + ${translateX}px), calc(-50% + ${translateY}px)) rotate(${rotationDegrees}deg) scale(${scale})`;
+      const horizontalScale = isFlipped ? -scale : scale;
+      sticker.style.transform = `translate(calc(-50% + ${translateX}px), calc(-50% + ${translateY}px)) rotate(${rotationDegrees}deg) scale(${horizontalScale}, ${scale})`;
+      saveSelectedStickerTransform();
     }
 
     function updateSelectionBox() {
@@ -452,27 +646,110 @@
       updateSelectionBox();
     }
 
-    function configureStickerVideo(sourceVideo) {
-      const source = sourceVideo.currentSrc || sourceVideo.src;
-      stickerVideo.crossOrigin = sourceVideo.crossOrigin || "anonymous";
-      stickerVideo.loop = sourceVideo.loop;
-      stickerVideo.muted = sourceVideo.muted;
-      stickerVideo.playsInline = sourceVideo.playsInline;
-      stickerVideo.playbackRate = sourceVideo.playbackRate || 1;
-      stickerVideo.autoplay = true;
-      stickerVideo.toggleAttribute("loop", sourceVideo.loop);
-      stickerVideo.toggleAttribute("muted", sourceVideo.muted);
-      stickerVideo.toggleAttribute("playsinline", sourceVideo.playsInline);
-      stickerVideo.toggleAttribute("webkit-playsinline", sourceVideo.hasAttribute("webkit-playsinline"));
-      stickerVideo.src = source;
+    function selectSticker(record) {
+      saveSelectedStickerTransform();
+      selectedSticker = record || null;
+      if (!selectedSticker) {
+        clearSelectedStickerRefs();
+        removeSelectionBox();
+        return;
+      }
+
+      liveTargetState = selectedSticker.targetState;
+      sticker = selectedSticker.element;
+      stickerVideo = selectedSticker.video;
+      stickerCanvas = selectedSticker.canvas;
+      packedAlphaRenderer = selectedSticker.renderer;
+      translateX = selectedSticker.translateX;
+      translateY = selectedSticker.translateY;
+      scale = selectedSticker.scale;
+      rotationDegrees = selectedSticker.rotationDegrees;
+      isFlipped = !!selectedSticker.isFlipped;
+      createSelectionBox();
+      isSelectionVisible = true;
+      applyStickerTransform();
+      clampStickerPosition();
+      updateSelectionBox();
     }
 
-    async function syncArTimeToSticker(sourceVideo) {
+    function saveSelectedStickerTransform() {
+      if (!selectedSticker) return;
+      selectedSticker.translateX = translateX;
+      selectedSticker.translateY = translateY;
+      selectedSticker.scale = scale;
+      selectedSticker.rotationDegrees = rotationDegrees;
+      selectedSticker.isFlipped = isFlipped;
+    }
+
+    function clearSelectedStickerRefs() {
+      selectedSticker = null;
+      liveTargetState = null;
+      sticker = null;
+      stickerVideo = null;
+      stickerCanvas = null;
+      packedAlphaRenderer = null;
+      translateX = 0;
+      translateY = 0;
+      scale = 1;
+      rotationDegrees = 0;
+      isFlipped = false;
+    }
+
+    function findStickerByElement(element) {
+      for (const record of liveStickers.values()) {
+        if (record.element === element) return record;
+      }
+      return null;
+    }
+
+    function findStickerForTarget(targetId) {
+      for (const record of liveStickers.values()) {
+        if (
+          record.targetState &&
+          record.targetState.target &&
+          record.targetState.target.id === targetId
+        ) {
+          return record;
+        }
+      }
+      return null;
+    }
+
+    function hasStickerForTarget(targetId) {
+      return Boolean(findStickerForTarget(targetId));
+    }
+
+    function setStickerInteractivity(isInteractive) {
+      liveStickers.forEach((record) => {
+        if (record.element) {
+          record.element.style.pointerEvents = isInteractive ? "auto" : "none";
+        }
+      });
+    }
+
+    function configureStickerVideo(video, sourceVideo) {
+      const source = sourceVideo.currentSrc || sourceVideo.src;
+      video.crossOrigin = sourceVideo.crossOrigin || "anonymous";
+      video.loop = sourceVideo.loop;
+      video.muted = sourceVideo.muted;
+      video.playsInline = sourceVideo.playsInline;
+      video.playbackRate = sourceVideo.playbackRate || 1;
+      video.autoplay = true;
+      video.toggleAttribute("loop", sourceVideo.loop);
+      video.toggleAttribute("muted", sourceVideo.muted);
+      video.toggleAttribute("playsinline", sourceVideo.playsInline);
+      video.toggleAttribute("webkit-playsinline", sourceVideo.hasAttribute("webkit-playsinline"));
+      video.src = source;
+    }
+
+    async function syncArTimeToSticker(sourceVideo, video, pauseSource = true) {
       if (!sourceVideo || !Number.isFinite(sourceVideo.currentTime)) return;
       try {
-        await waitForVideoMetadata(stickerVideo);
-        stickerVideo.currentTime = sourceVideo.currentTime;
-        sourceVideo.pause();
+        await waitForVideoMetadata(video);
+        video.currentTime = sourceVideo.currentTime;
+        if (pauseSource) {
+          sourceVideo.pause();
+        }
       } catch (error) {
         console.warn("Could not sync AR video time to Live sticker", error);
       }
@@ -502,10 +779,10 @@
       });
     }
 
-    function syncStickerTimeToAr() {
-      if (!stickerVideo || !liveTargetState || !liveTargetState.video || !Number.isFinite(stickerVideo.currentTime)) return;
+    function syncSelectedStickerTimeToAr() {
+      if (!selectedSticker || !selectedSticker.video || !selectedSticker.targetState.video || !Number.isFinite(selectedSticker.video.currentTime)) return;
       try {
-        liveTargetState.video.currentTime = stickerVideo.currentTime;
+        selectedSticker.targetState.video.currentTime = selectedSticker.video.currentTime;
       } catch (error) {
         console.warn("Could not sync Live sticker time back to AR video", error);
       }
@@ -519,31 +796,54 @@
       if (targetState && targetState.overlay && targetState.overlay.object3D) {
         targetState.overlay.object3D.visible = false;
       }
-      if (targetState === liveTargetState && targetState.video) {
+      if (
+        targetState &&
+        hasStickerForTarget(targetState.target.id) &&
+        targetState.video
+      ) {
         targetState.video.pause();
       }
     }
 
+    function showTargetOverlay(targetState) {
+      if (!targetState || !targetState.overlay || !targetState.overlay.object3D) return;
+      targetState.overlay.object3D.visible = true;
+      if (targetState.videoConfig && targetState.videoConfig.autoplay && shouldPlayTargetVideo(targetState)) {
+        targetState.video.play().catch((error) => {
+          console.warn("AR video play was blocked while restoring target overlay", error);
+        });
+      }
+    }
+
+    function restoreTargetOverlay(targetState) {
+      if (
+        targetState &&
+        hasStickerForTarget(targetState.target.id)
+      ) {
+        hideTargetOverlay(targetState);
+        return;
+      }
+      showTargetOverlay(targetState);
+    }
+
     function restoreVisibleTargetOverlays() {
       visibleTargetStates.forEach((targetState) => {
-        if (!targetState.overlay || !targetState.overlay.object3D) return;
-        targetState.overlay.object3D.visible = true;
-        if (targetState.videoConfig && targetState.videoConfig.autoplay) {
-          targetState.video.play().catch((error) => {
-            console.warn("AR video play was blocked after Live mode", error);
-          });
-        }
+        restoreTargetOverlay(targetState);
       });
     }
 
     function updateLiveButton() {
-      const canEnterLive = isStarted && isTargetVisible && !!activeTargetState && mode === "attached";
+      const canEnterLive = isStarted && mode === "attached" && ((isTargetVisible && !!activeTargetState) || liveStickers.size > 0);
       liveButton.disabled = !canEnterLive;
       liveButton.classList.toggle("hidden", !canEnterLive);
     }
 
     function shouldPlayTargetVideo(targetState) {
-      return mode === "attached" || targetState !== liveTargetState;
+      return (
+        !targetState ||
+        !targetState.target ||
+        !hasStickerForTarget(targetState.target.id)
+      );
     }
 
     function clampStickerPosition() {
@@ -573,15 +873,25 @@
     }
 
     function getStickerUnrotatedBounds() {
-      if (!sticker) return null;
-      const width = sticker.offsetWidth || (stickerVideo && stickerVideo.videoWidth) || 0;
-      let height = sticker.offsetHeight || 0;
-      if (!height && stickerVideo && stickerVideo.videoWidth && stickerVideo.videoHeight && width) {
-        height = width * (stickerVideo.videoHeight / stickerVideo.videoWidth);
+      return selectedSticker ? getRecordUnrotatedBounds(selectedSticker) : null;
+    }
+
+    function getRecordUnrotatedBounds(record) {
+      if (!record || !record.element) return null;
+      const width = record.element.offsetWidth || (record.video && record.video.videoWidth) || 0;
+      let height = record.element.offsetHeight || 0;
+      if (!height && record.canvas && record.canvas.width && record.canvas.height && width) {
+        height = width * (record.canvas.height / record.canvas.width);
+      }
+      if (!height && record.video && record.video.videoWidth && record.video.videoHeight && width) {
+        const videoHeight = record.targetState.usesPackedAlpha
+          ? record.video.videoHeight / 2
+          : record.video.videoHeight;
+        height = width * (videoHeight / record.video.videoWidth);
       }
       return {
-        width: width * scale,
-        height: height * scale
+        width: width * record.scale,
+        height: height * record.scale
       };
     }
 
@@ -607,10 +917,49 @@
     function handleDocumentPointerDown(event) {
       if (mode !== "live" || !sticker || !selectionBox) return;
       const target = event.target;
-      if (sticker.contains(target) || selectionBox.contains(target) || exitButton.contains(target) || deleteButton.contains(target)) {
+      if (
+        sticker.contains(target) ||
+        selectionBox.contains(target) ||
+        exitButton.contains(target) ||
+        addButton.contains(target) ||
+        deleteButton.contains(target)
+      ) {
         return;
       }
       hideSelectionBox();
+    }
+
+    function getCaptureState() {
+      if (!liveStickers.size) {
+        return { active: false };
+      }
+
+      saveSelectedStickerTransform();
+      const stickers = [...liveStickers.values()]
+        .map((record) => {
+          const source = record.targetState.usesPackedAlpha ? record.canvas : record.video;
+          const bounds = getRecordUnrotatedBounds(record);
+          if (!source || !bounds || bounds.width <= 0 || bounds.height <= 0) {
+            return null;
+          }
+
+          return {
+            source,
+            centerX: window.innerWidth / 2 + record.translateX,
+            centerY: window.innerHeight / 2 + record.translateY,
+            width: bounds.width,
+            height: bounds.height,
+            rotationDegrees: record.rotationDegrees,
+            isFlipped: !!record.isFlipped
+          };
+        })
+        .filter(Boolean);
+
+      return {
+        active: stickers.length > 0,
+        includeArCanvas: mode === "attached",
+        stickers
+      };
     }
 
     return {
@@ -618,12 +967,79 @@
       setTargetVisible,
       setTargetVisibility,
       setActiveTarget,
-      shouldPlayTargetVideo
+      shouldPlayTargetVideo,
+      getCaptureState
     };
   }
 
   function clamp(value, minimum, maximum) {
     return Math.min(maximum, Math.max(minimum, value));
+  }
+
+  function createPackedAlphaRenderer(video, canvas) {
+    const context = canvas.getContext("2d");
+    const maskCanvas = document.createElement("canvas");
+    const maskContext = maskCanvas.getContext("2d");
+    let animationFrame = null;
+
+    function drawFrame() {
+      const sourceWidth = video.videoWidth || video.clientWidth;
+      const packedHeight = video.videoHeight || video.clientHeight;
+      const sourceHeight = Math.floor(packedHeight / 2);
+      if (!sourceWidth || !sourceHeight || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+        return;
+      }
+
+      if (canvas.width !== sourceWidth || canvas.height !== sourceHeight) {
+        canvas.width = sourceWidth;
+        canvas.height = sourceHeight;
+        maskCanvas.width = sourceWidth;
+        maskCanvas.height = sourceHeight;
+      }
+
+      context.clearRect(0, 0, sourceWidth, sourceHeight);
+      maskContext.clearRect(0, 0, sourceWidth, sourceHeight);
+      context.drawImage(video, 0, 0, sourceWidth, sourceHeight, 0, 0, sourceWidth, sourceHeight);
+      maskContext.drawImage(video, 0, sourceHeight, sourceWidth, sourceHeight, 0, 0, sourceWidth, sourceHeight);
+
+      const color = context.getImageData(0, 0, sourceWidth, sourceHeight);
+      const mask = maskContext.getImageData(0, 0, sourceWidth, sourceHeight);
+      const colorPixels = color.data;
+      const maskPixels = mask.data;
+
+      for (let i = 0; i < colorPixels.length; i += 4) {
+        colorPixels[i + 3] = Math.round(
+          (0.299 * maskPixels[i]) +
+            (0.587 * maskPixels[i + 1]) +
+            (0.114 * maskPixels[i + 2])
+        );
+      }
+
+      context.putImageData(color, 0, 0);
+    }
+
+    function renderLoop() {
+      drawFrame();
+      animationFrame = window.requestAnimationFrame(renderLoop);
+    }
+
+    return {
+      drawFrame,
+      start() {
+        if (animationFrame) return;
+        renderLoop();
+      },
+      dispose() {
+        if (animationFrame) {
+          window.cancelAnimationFrame(animationFrame);
+          animationFrame = null;
+        }
+        canvas.width = 0;
+        canvas.height = 0;
+        maskCanvas.width = 0;
+        maskCanvas.height = 0;
+      }
+    };
   }
 
   function fileNameFromPath(path) {

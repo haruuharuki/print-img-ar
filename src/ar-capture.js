@@ -16,7 +16,7 @@
     init
   };
 
-  function init({ scene, statusBox, overlayElement, overlayVideo }) {
+  function init({ scene, statusBox, overlayElement, overlayVideo, overlayUsesPackedAlpha, getLiveCaptureState }) {
     const captureButton = document.querySelector("#captureButton");
     const modeSwitch = document.querySelector("#cameraModeSwitch");
     const photoModeButton = document.querySelector("#photoModeButton");
@@ -42,10 +42,11 @@
     let recorderState = null;
     let activeOverlayElement = overlayElement;
     let activeOverlayVideo = overlayVideo;
+    let activeOverlayUsesPackedAlpha = !!overlayUsesPackedAlpha;
 
     captureButton.addEventListener("click", async () => {
       if (isPreviewOpen) return;
-      if (!hasVisibleTarget) {
+      if (!hasCapturableSubject()) {
         statusBox.textContent = "ยังไม่เจอ AR overlay สำหรับถ่ายภาพ";
         updateControls();
         return;
@@ -62,7 +63,13 @@
 
       captureButton.disabled = true;
       try {
-        const blob = await capturePhoto({ scene, overlayElement: activeOverlayElement, overlayVideo: activeOverlayVideo });
+        const blob = await capturePhoto({
+          scene,
+          overlayElement: activeOverlayElement,
+          overlayVideo: activeOverlayVideo,
+          overlayUsesPackedAlpha: activeOverlayUsesPackedAlpha,
+          getLiveCaptureState
+        });
         showPreview({ blob, mimeType: "image/png", fileName: mediaFileName("photo", "png") });
         statusBox.textContent = "ถ่ายภาพแล้ว เลือก Share หรือ Download ได้เลย";
       } catch (error) {
@@ -116,7 +123,7 @@
 
     function setTargetVisible(value) {
       hasVisibleTarget = value;
-      if (!value && recorderState) {
+      if (!value && recorderState && !isLiveCaptureActive()) {
         stopVideoRecording({ reason: "targetLost" });
       }
       updateControls();
@@ -125,6 +132,7 @@
     function setActiveOverlay(nextOverlay) {
       activeOverlayElement = nextOverlay.overlayElement;
       activeOverlayVideo = nextOverlay.overlayVideo;
+      activeOverlayUsesPackedAlpha = !!nextOverlay.overlayUsesPackedAlpha;
     }
 
     function setMode(nextMode) {
@@ -145,7 +153,14 @@
 
       captureButton.disabled = true;
       try {
-        const compositor = createCompositor({ scene, overlayElement: activeOverlayElement, overlayVideo: activeOverlayVideo, maxEdge: VIDEO_MAX_EDGE });
+        const compositor = createCompositor({
+          scene,
+          overlayElement: activeOverlayElement,
+          overlayVideo: activeOverlayVideo,
+          overlayUsesPackedAlpha: activeOverlayUsesPackedAlpha,
+          getLiveCaptureState,
+          maxEdge: VIDEO_MAX_EDGE
+        });
         compositor.drawFrame();
 
         const stream = compositor.canvas.captureStream(RECORDING_FPS);
@@ -245,9 +260,18 @@
     }
 
     function updateControls() {
-      captureButton.disabled = isPreviewOpen || !hasStarted || !hasVisibleTarget || false;
+      captureButton.disabled = isPreviewOpen || !hasStarted || !hasCapturableSubject() || false;
       photoModeButton.disabled = !!recorderState || isPreviewOpen;
       videoModeButton.disabled = !!recorderState || isPreviewOpen;
+    }
+
+    function hasCapturableSubject() {
+      return hasVisibleTarget || isLiveCaptureActive();
+    }
+
+    function isLiveCaptureActive() {
+      const liveCaptureState = getLiveCaptureState && getLiveCaptureState();
+      return !!(liveCaptureState && liveCaptureState.active);
     }
 
     function showPreview({ blob, mimeType, fileName }) {
@@ -317,8 +341,15 @@
     }
   }
 
-  async function capturePhoto({ scene, overlayElement, overlayVideo }) {
-    const compositor = createCompositor({ scene, overlayElement, overlayVideo, maxEdge: MAX_CAPTURE_EDGE });
+  async function capturePhoto({ scene, overlayElement, overlayVideo, overlayUsesPackedAlpha, getLiveCaptureState }) {
+    const compositor = createCompositor({
+      scene,
+      overlayElement,
+      overlayVideo,
+      overlayUsesPackedAlpha,
+      getLiveCaptureState,
+      maxEdge: MAX_CAPTURE_EDGE
+    });
     try {
       compositor.drawFrame();
       const blob = await canvasToBlob(compositor.canvas, "image/png");
@@ -329,7 +360,7 @@
     }
   }
 
-  function createCompositor({ scene, overlayElement, overlayVideo, maxEdge }) {
+  function createCompositor({ scene, overlayElement, overlayVideo, overlayUsesPackedAlpha, getLiveCaptureState, maxEdge }) {
     const mindarSystem = scene.systems["mindar-image-system"];
     const cameraVideo = mindarSystem && mindarSystem.video;
     const arCanvas = scene.renderer && scene.renderer.domElement;
@@ -353,6 +384,7 @@
     canvas.height = Math.max(1, Math.round(containerRect.height * scale));
 
     const context = canvas.getContext("2d", { alpha: false });
+    const packedAlphaSource = overlayUsesPackedAlpha ? createPackedAlphaSource() : null;
 
     return {
       canvas,
@@ -361,9 +393,47 @@
         context.fillRect(0, 0, canvas.width, canvas.height);
 
         drawElementCoveringContainer({ context, element: cameraVideo, containerRect, scale });
+        const liveCaptureState = getLiveCaptureState && getLiveCaptureState();
+        if (liveCaptureState && liveCaptureState.active) {
+          if (liveCaptureState.includeArCanvas) {
+            drawElementCoveringContainer({ context, element: arCanvas, containerRect, scale });
+          }
+          const liveStickers = Array.isArray(liveCaptureState.stickers)
+            ? liveCaptureState.stickers
+            : [liveCaptureState];
+          liveStickers.forEach((liveSticker) => {
+            drawLiveSticker({
+              context,
+              source: liveSticker.source,
+              centerX: liveSticker.centerX,
+              centerY: liveSticker.centerY,
+              width: liveSticker.width,
+              height: liveSticker.height,
+              rotationDegrees: liveSticker.rotationDegrees,
+              isFlipped: liveSticker.isFlipped,
+              containerRect,
+              scale
+            });
+          });
+          return;
+        }
+
         drawElementCoveringContainer({ context, element: arCanvas, containerRect, scale });
 
         if (!canvasHasVisiblePixels(arCanvas)) {
+          if (overlayUsesPackedAlpha) {
+            drawProjectedPackedAlphaOverlay({
+              context,
+              scene,
+              overlayElement,
+              overlayVideo,
+              containerRect,
+              scale,
+              packedAlphaSource
+            });
+            return;
+          }
+
           drawProjectedOverlayVideo({
             context,
             scene,
@@ -374,7 +444,9 @@
           });
         }
       },
-      dispose() {}
+      dispose() {
+        if (packedAlphaSource) packedAlphaSource.dispose();
+      }
     };
   }
 
@@ -397,6 +469,39 @@
     const dh = rect.height * scale;
 
     context.drawImage(element, dx, dy, dw, dh);
+  }
+
+  function drawLiveSticker({
+    context,
+    source,
+    centerX,
+    centerY,
+    width,
+    height,
+    rotationDegrees,
+    isFlipped,
+    containerRect,
+    scale
+  }) {
+    if (!source || !width || !height) return;
+    if (source instanceof HTMLVideoElement && source.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+      return;
+    }
+
+    const cx = (centerX - containerRect.left) * scale;
+    const cy = (centerY - containerRect.top) * scale;
+    const dw = width * scale;
+    const dh = height * scale;
+    const angle = (rotationDegrees || 0) * Math.PI / 180;
+
+    context.save();
+    context.translate(cx, cy);
+    context.rotate(angle);
+    if (isFlipped) {
+      context.scale(-1, 1);
+    }
+    context.drawImage(source, -dw / 2, -dh / 2, dw, dh);
+    context.restore();
   }
 
   function canvasHasVisiblePixels(canvas) {
@@ -424,6 +529,45 @@
     if (!overlayElement || !overlayVideo || overlayVideo.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
       return;
     }
+    const sourceWidth = overlayVideo.videoWidth || overlayVideo.clientWidth;
+    const sourceHeight = overlayVideo.videoHeight || overlayVideo.clientHeight;
+    if (!sourceWidth || !sourceHeight) return;
+
+    drawProjectedOverlaySource({
+      context,
+      scene,
+      overlayElement,
+      source: overlayVideo,
+      sourceWidth,
+      sourceHeight,
+      containerRect,
+      scale
+    });
+  }
+
+  function drawProjectedPackedAlphaOverlay({ context, scene, overlayElement, overlayVideo, containerRect, scale, packedAlphaSource }) {
+    if (!overlayElement || !overlayVideo || overlayVideo.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+      return;
+    }
+
+    if (!packedAlphaSource) return;
+
+    const source = packedAlphaSource.update(overlayVideo);
+    if (!source) return;
+
+    drawProjectedOverlaySource({
+      context,
+      scene,
+      overlayElement,
+      source: source.canvas,
+      sourceWidth: source.width,
+      sourceHeight: source.height,
+      containerRect,
+      scale
+    });
+  }
+
+  function drawProjectedOverlaySource({ context, scene, overlayElement, source, sourceWidth, sourceHeight, containerRect, scale }) {
     if (!window.THREE || !scene.camera) {
       return;
     }
@@ -447,10 +591,6 @@
       return;
     }
 
-    const sourceWidth = overlayVideo.videoWidth || overlayVideo.clientWidth;
-    const sourceHeight = overlayVideo.videoHeight || overlayVideo.clientHeight;
-    if (!sourceWidth || !sourceHeight) return;
-
     context.save();
     context.setTransform(
       (corners[1].x - corners[0].x) / sourceWidth,
@@ -460,8 +600,63 @@
       corners[0].x,
       corners[0].y
     );
-    context.drawImage(overlayVideo, 0, 0, sourceWidth, sourceHeight);
+    context.drawImage(source, 0, 0, sourceWidth, sourceHeight);
     context.restore();
+  }
+
+  function createPackedAlphaSource() {
+    const canvas = document.createElement("canvas");
+    const maskCanvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+    const maskContext = maskCanvas.getContext("2d");
+
+    return {
+      canvas,
+      update(video) {
+        const sourceWidth = video.videoWidth || video.clientWidth;
+        const packedHeight = video.videoHeight || video.clientHeight;
+        const sourceHeight = Math.floor(packedHeight / 2);
+        if (!sourceWidth || !sourceHeight) return null;
+
+        if (canvas.width !== sourceWidth || canvas.height !== sourceHeight) {
+          canvas.width = sourceWidth;
+          canvas.height = sourceHeight;
+          maskCanvas.width = sourceWidth;
+          maskCanvas.height = sourceHeight;
+        }
+
+        context.clearRect(0, 0, sourceWidth, sourceHeight);
+        maskContext.clearRect(0, 0, sourceWidth, sourceHeight);
+        context.drawImage(video, 0, 0, sourceWidth, sourceHeight, 0, 0, sourceWidth, sourceHeight);
+        maskContext.drawImage(video, 0, sourceHeight, sourceWidth, sourceHeight, 0, 0, sourceWidth, sourceHeight);
+
+        const color = context.getImageData(0, 0, sourceWidth, sourceHeight);
+        const mask = maskContext.getImageData(0, 0, sourceWidth, sourceHeight);
+        const colorPixels = color.data;
+        const maskPixels = mask.data;
+
+        for (let i = 0; i < colorPixels.length; i += 4) {
+          colorPixels[i + 3] = Math.round(
+            (0.299 * maskPixels[i]) +
+              (0.587 * maskPixels[i + 1]) +
+              (0.114 * maskPixels[i + 2])
+          );
+        }
+
+        context.putImageData(color, 0, 0);
+        return {
+          canvas,
+          width: sourceWidth,
+          height: sourceHeight
+        };
+      },
+      dispose() {
+        canvas.width = 0;
+        canvas.height = 0;
+        maskCanvas.width = 0;
+        maskCanvas.height = 0;
+      }
+    };
   }
 
   function projectCorner({ x, y, object3D, camera, containerRect, scale }) {

@@ -206,6 +206,7 @@
       }
 
       .live-exit-button,
+      .live-add-button,
       .live-delete-button {
         position: fixed;
         z-index: 35;
@@ -223,6 +224,14 @@
 
       .live-exit-button {
         left: 12px;
+      }
+
+      .live-add-button {
+        left: 76px;
+        min-width: 44px;
+        padding: 0;
+        font-size: 24px;
+        line-height: 1;
       }
 
       .live-delete-button {
@@ -284,6 +293,22 @@
       .live-selection-resize {
         right: -21px;
         bottom: -21px;
+      }
+
+      .live-selection-duplicate {
+        left: -21px;
+        top: -21px;
+        color: #ffffff;
+        font-size: 22px;
+        line-height: 1;
+      }
+
+      .live-selection-flip {
+        left: -21px;
+        bottom: -21px;
+        color: #ffffff;
+        font-size: 21px;
+        line-height: 1;
       }
 
       .live-selection-resize::before {
@@ -425,6 +450,13 @@
 
     <button id="liveModeButton" class="live-button hidden" type="button" disabled>Live</button>
     <button id="liveExitButton" class="live-exit-button hidden" type="button">AR</button>
+    <button
+      id="liveAddButton"
+      class="live-add-button hidden"
+      type="button"
+      aria-label="????? Live sticker ????????????????????"
+      title="????? Live sticker"
+    >+</button>
     <button id="liveDeleteButton" class="live-delete-button hidden" type="button">Delete</button>
     <div id="liveStickerLayer" class="live-sticker-layer hidden" aria-label="Live sticker layer"></div>
 

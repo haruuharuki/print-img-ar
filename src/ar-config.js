@@ -4,7 +4,7 @@
       smoothing: {
         enabled: true,
         filterMinCF: 0.001,
-        filterBeta: 500,
+        filterBeta: 30,
         warmupTolerance: 5,
         missTolerance: 8
       }
