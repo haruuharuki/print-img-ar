@@ -850,14 +850,39 @@ def save_library_target(form):
 
     target_image = required_form_file(form, "targetImage")
     overlay_video = required_form_file(form, "overlayVideo")
+    overlay_packed_video = optional_form_file(form, "overlayPackedVideo")
     targets_mind = required_form_file(form, "targetsMind")
 
     target_ext = image_extension(target_image.filename)
     overlay_ext = overlay_extension(overlay_video.filename)
+    packed_path = target.get("overlayPackedPath")
+
     if target.get("imagePath") != f"./assets/targets/{target_id}{target_ext}":
         raise DeployError("library imagePath does not match targetId.", details={"imagePath": target.get("imagePath")})
     if target.get("overlayPath") != f"./assets/overlays/{target_id}{overlay_ext}":
         raise DeployError("library overlayPath does not match targetId.", details={"overlayPath": target.get("overlayPath")})
+
+    if overlay_packed_video is not None:
+        packed_ext = overlay_extension(overlay_packed_video.filename)
+        if packed_ext != ".mp4":
+            raise DeployError(
+                "Packed alpha overlay must be an MP4.",
+                details={"filename": overlay_packed_video.filename},
+            )
+        expected_packed_path = f"./assets/overlays/{target_id}-packed.mp4"
+        if packed_path != expected_packed_path:
+            raise DeployError(
+                "library overlayPackedPath does not match targetId.",
+                details={
+                    "overlayPackedPath": packed_path,
+                    "expected": expected_packed_path,
+                },
+            )
+    elif packed_path:
+        raise DeployError(
+            "Library target expects a packed overlay, but overlayPackedVideo was not uploaded.",
+            details={"overlayPackedPath": packed_path},
+        )
 
     normalized_library = normalize_library(library)
 
@@ -865,19 +890,30 @@ def save_library_target(form):
     OVERLAYS_DIR.mkdir(parents=True, exist_ok=True)
     write_uploaded_file(target_image, TARGETS_DIR / f"{target_id}{target_ext}")
     write_uploaded_file(overlay_video, OVERLAYS_DIR / f"{target_id}{overlay_ext}")
+    if overlay_packed_video is not None:
+        write_uploaded_file(
+            overlay_packed_video,
+            OVERLAYS_DIR / f"{target_id}-packed.mp4",
+        )
     write_uploaded_file(targets_mind, TARGETS_MIND_PATH)
     write_library_js(normalized_library)
+
+    written_files = [
+        f"assets/targets/{target_id}{target_ext}",
+        f"assets/overlays/{target_id}{overlay_ext}",
+    ]
+    if overlay_packed_video is not None:
+        written_files.append(f"assets/overlays/{target_id}-packed.mp4")
+    written_files.extend([
+        "assets/targets.mind",
+        "src/ar-library.js",
+    ])
 
     return {
         "changed": True,
         "targetId": target_id,
         "activeTargets": len([target for target in normalized_library["targets"] if target.get("enabled")]),
-        "writtenFiles": [
-            f"assets/targets/{target_id}{target_ext}",
-            f"assets/overlays/{target_id}{overlay_ext}",
-            "assets/targets.mind",
-            "src/ar-library.js",
-        ],
+        "writtenFiles": written_files,
         "library": normalized_library,
     }
 
@@ -1399,6 +1435,13 @@ def required_form_file(form, name):
     return field
 
 
+def optional_form_file(form, name):
+    field = form[name] if name in form else None
+    if field is None or not getattr(field, "filename", ""):
+        return None
+    return field
+
+
 def parse_library_json(text):
     try:
         value = json.loads(text)
@@ -1462,7 +1505,27 @@ def normalize_target(target):
     overlay_path = validate_asset_path(target.get("overlayPath"), "assets/overlays/", OVERLAY_EXTENSIONS)
     overlay = validate_overlay(target.get("overlay"), f"target {target_id} overlay")
 
-    return {
+    overlay_packed_path = None
+    overlay_mode = str(target.get("overlayMode") or "video").strip()
+
+    if target.get("overlayPackedPath"):
+        overlay_packed_path = validate_asset_path(
+            target.get("overlayPackedPath"),
+            "assets/overlays/",
+            {".mp4"},
+        )
+        if overlay_mode not in {"auto-alpha", "packed-alpha"}:
+            raise DeployError(
+                "Invalid overlayMode for packed alpha target.",
+                details={
+                    "overlayMode": overlay_mode,
+                    "allowed": ["auto-alpha", "packed-alpha"],
+                },
+            )
+    else:
+        overlay_mode = "video"
+
+    normalized = {
         "id": target_id,
         "name": str(target.get("name") or target_id).strip()[:80],
         "enabled": bool(target.get("enabled", True)),
@@ -1474,6 +1537,12 @@ def normalize_target(target):
         "video": normalize_video(target.get("video")),
         "updatedAt": str(target.get("updatedAt") or utc_now()),
     }
+
+    if overlay_packed_path:
+        normalized["overlayPackedPath"] = overlay_packed_path
+        normalized["overlayMode"] = overlay_mode
+
+    return normalized
 
 
 def validate_asset_path(value, prefix, extensions):
