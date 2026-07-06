@@ -46,7 +46,7 @@
         "muted": true,
         "playsInline": true
       },
-      "updatedAt": "2026-07-06T08:26:43.369Z",
+      "updatedAt": "2026-07-06T08:58:27.832Z",
       "overlayPackedPath": "./assets/overlays/nuwa-packed.mp4",
       "overlayMode": "auto-alpha"
     }
