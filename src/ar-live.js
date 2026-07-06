@@ -41,6 +41,7 @@
     let duplicateSequence = 0;
     const visibleTargetStates = new Map();
     const liveStickers = new Map();
+    const packedSources = new Map();
     const pointers = new Map();
 
     liveButton.addEventListener("click", enterLiveMode);
@@ -190,29 +191,39 @@
 
       const nextSticker = document.createElement("div");
       nextSticker.className = "live-sticker";
-      const nextVideo = document.createElement("video");
+
+      let nextVideo = null;
       let nextCanvas = null;
       let nextRenderer = null;
+      let sharedPackedSource = null;
+
       if (targetState.usesPackedAlpha) {
+        sharedPackedSource = await acquirePackedSource(
+          targetState,
+          sourceRecord
+        );
+        nextVideo = sharedPackedSource.video;
+        nextRenderer = sharedPackedSource.renderer;
+
         nextCanvas = document.createElement("canvas");
         nextCanvas.style.display = "block";
         nextCanvas.style.width = "100%";
         nextCanvas.style.height = "auto";
         nextCanvas.style.pointerEvents = "none";
-        nextVideo.style.display = "none";
-        nextRenderer = createPackedAlphaRenderer(nextVideo, nextCanvas);
-      }
-      configureStickerVideo(nextVideo, targetState.video);
-      nextVideo.setAttribute("playsinline", "");
-      nextVideo.setAttribute("webkit-playsinline", "");
-      nextVideo.addEventListener("error", () => {
-        statusBox.textContent = `This browser could not play ${fileNameFromPath(targetState.target.overlayPath)} as a Live sticker.`;
-      });
 
-      nextSticker.append(nextVideo);
-      if (nextCanvas) {
+        sharedPackedSource.addSubscriber(nextCanvas);
         nextSticker.append(nextCanvas);
+      } else {
+        nextVideo = document.createElement("video");
+        configureStickerVideo(nextVideo, targetState.video);
+        nextVideo.setAttribute("playsinline", "");
+        nextVideo.setAttribute("webkit-playsinline", "");
+        nextVideo.addEventListener("error", () => {
+          statusBox.textContent = `This browser could not play ${fileNameFromPath(targetState.target.overlayPath)} as a Live sticker.`;
+        });
+        nextSticker.append(nextVideo);
       }
+
       layer.append(nextSticker);
 
       const stickerKey = allowDuplicate
@@ -226,6 +237,7 @@
         video: nextVideo,
         canvas: nextCanvas,
         renderer: nextRenderer,
+        sharedPackedSource,
         translateX: initialTransform ? initialTransform.translateX : 0,
         translateY: initialTransform ? initialTransform.translateY : 0,
         scale: initialTransform ? initialTransform.scale : 1,
@@ -235,18 +247,24 @@
 
       liveStickers.set(stickerKey, record);
       selectSticker(record);
-      await syncArTimeToSticker(
-        sourceRecord ? sourceRecord.video : targetState.video,
-        nextVideo,
-        !sourceRecord
-      );
-      if (nextRenderer) nextRenderer.drawFrame();
+
+      if (!targetState.usesPackedAlpha) {
+        await syncArTimeToSticker(
+          sourceRecord ? sourceRecord.video : targetState.video,
+          nextVideo,
+          !sourceRecord
+        );
+      }
+
       applyStickerTransform();
       bindStickerGestures(nextSticker);
       clampStickerPosition();
       hideTargetOverlay(targetState);
-      await nextVideo.play();
-      if (nextRenderer) nextRenderer.start();
+
+      if (!targetState.usesPackedAlpha) {
+        await nextVideo.play();
+      }
+
       return record;
     }
 
@@ -259,14 +277,17 @@
       dragStart = null;
       resizeStart = null;
       rotateStart = null;
-      if (selectedSticker.renderer) {
-        selectedSticker.renderer.dispose();
-      }
-      if (selectedSticker.video) {
+      if (selectedSticker.sharedPackedSource) {
+        selectedSticker.sharedPackedSource.removeSubscriber(
+          selectedSticker.canvas
+        );
+        releasePackedSource(selectedSticker.targetState.target.id);
+      } else if (selectedSticker.video) {
         selectedSticker.video.pause();
         selectedSticker.video.removeAttribute("src");
         selectedSticker.video.load();
       }
+
       if (selectedSticker.canvas) {
         selectedSticker.canvas.remove();
       }
@@ -275,6 +296,78 @@
       }
       liveStickers.delete(selectedSticker.stickerKey);
       clearSelectedStickerRefs();
+    }
+
+    async function acquirePackedSource(targetState, sourceRecord) {
+      const targetId = targetState.target.id;
+      const existing = packedSources.get(targetId);
+
+      if (existing) {
+        existing.refCount += 1;
+        return existing;
+      }
+
+      const video = document.createElement("video");
+      video.style.display = "none";
+      configureStickerVideo(video, targetState.video);
+      video.setAttribute("playsinline", "");
+      video.setAttribute("webkit-playsinline", "");
+      video.addEventListener("error", () => {
+        statusBox.textContent = `This browser could not play ${fileNameFromPath(targetState.target.overlayPath)} as a Live sticker.`;
+      });
+
+      const masterCanvas = document.createElement("canvas");
+      const subscribers = new Set();
+
+      const renderer = createPackedAlphaRenderer(
+        video,
+        masterCanvas,
+        subscribers
+      );
+
+      const packedSource = {
+        targetId,
+        video,
+        masterCanvas,
+        renderer,
+        subscribers,
+        refCount: 1,
+        addSubscriber(canvas) {
+          subscribers.add(canvas);
+          renderer.drawFrame();
+        },
+        removeSubscriber(canvas) {
+          subscribers.delete(canvas);
+        }
+      };
+
+      packedSources.set(targetId, packedSource);
+
+      await syncArTimeToSticker(
+        sourceRecord ? sourceRecord.video : targetState.video,
+        video,
+        !sourceRecord
+      );
+
+      await video.play();
+      renderer.start();
+
+      return packedSource;
+    }
+
+    function releasePackedSource(targetId) {
+      const packedSource = packedSources.get(targetId);
+      if (!packedSource) return;
+
+      packedSource.refCount -= 1;
+      if (packedSource.refCount > 0) return;
+
+      packedSource.renderer.dispose();
+      packedSource.video.pause();
+      packedSource.video.removeAttribute("src");
+      packedSource.video.load();
+      packedSource.subscribers.clear();
+      packedSources.delete(targetId);
     }
 
     function bindStickerGestures(element) {
@@ -976,7 +1069,11 @@
     return Math.min(maximum, Math.max(minimum, value));
   }
 
-  function createPackedAlphaRenderer(video, canvas) {
+  function createPackedAlphaRenderer(
+    video,
+    canvas,
+    subscribers = new Set()
+  ) {
     const context = canvas.getContext("2d", {
       willReadFrequently: true
     });
@@ -1052,6 +1149,31 @@
       }
 
       context.putImageData(color, 0, 0);
+
+      for (const subscriber of subscribers) {
+        if (
+          subscriber.width !== renderWidth ||
+          subscriber.height !== renderHeight
+        ) {
+          subscriber.width = renderWidth;
+          subscriber.height = renderHeight;
+        }
+
+        const subscriberContext = subscriber.getContext("2d");
+        subscriberContext.clearRect(
+          0,
+          0,
+          renderWidth,
+          renderHeight
+        );
+        subscriberContext.drawImage(
+          canvas,
+          0,
+          0,
+          renderWidth,
+          renderHeight
+        );
+      }
     }
 
     function scheduleNextFrame() {
