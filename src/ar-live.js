@@ -977,13 +977,21 @@
   }
 
   function createPackedAlphaRenderer(video, canvas) {
-    const context = canvas.getContext("2d");
+    const context = canvas.getContext("2d", {
+      willReadFrequently: true
+    });
     const maskCanvas = document.createElement("canvas");
-    const maskContext = maskCanvas.getContext("2d");
+    const maskContext = maskCanvas.getContext("2d", {
+      willReadFrequently: true
+    });
     const isTouchDevice = window.matchMedia &&
       window.matchMedia("(pointer: coarse)").matches;
     const renderScale = isTouchDevice ? 0.7 : 1;
+    const fallbackFrameDelay = 1000 / 30;
     let animationFrame = null;
+    let videoFrameCallback = null;
+    let fallbackTimer = null;
+    let isRunning = false;
 
     function drawFrame() {
       const sourceWidth = video.videoWidth || video.clientWidth;
@@ -1046,22 +1054,58 @@
       context.putImageData(color, 0, 0);
     }
 
+    function scheduleNextFrame() {
+      if (!isRunning) return;
+
+      if (typeof video.requestVideoFrameCallback === "function") {
+        videoFrameCallback = video.requestVideoFrameCallback(renderLoop);
+        return;
+      }
+
+      fallbackTimer = window.setTimeout(() => {
+        fallbackTimer = null;
+        if (!isRunning) return;
+        animationFrame = window.requestAnimationFrame(renderLoop);
+      }, fallbackFrameDelay);
+    }
+
     function renderLoop() {
+      if (!isRunning) return;
+
+      animationFrame = null;
+      videoFrameCallback = null;
       drawFrame();
-      animationFrame = window.requestAnimationFrame(renderLoop);
+      scheduleNextFrame();
     }
 
     return {
       drawFrame,
       start() {
-        if (animationFrame) return;
+        if (isRunning) return;
+        isRunning = true;
         renderLoop();
       },
       dispose() {
-        if (animationFrame) {
+        isRunning = false;
+
+        if (
+          videoFrameCallback !== null &&
+          typeof video.cancelVideoFrameCallback === "function"
+        ) {
+          video.cancelVideoFrameCallback(videoFrameCallback);
+          videoFrameCallback = null;
+        }
+
+        if (animationFrame !== null) {
           window.cancelAnimationFrame(animationFrame);
           animationFrame = null;
         }
+
+        if (fallbackTimer !== null) {
+          window.clearTimeout(fallbackTimer);
+          fallbackTimer = null;
+        }
+
         canvas.width = 0;
         canvas.height = 0;
         maskCanvas.width = 0;
