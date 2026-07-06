@@ -191,6 +191,9 @@
 
       const nextSticker = document.createElement("div");
       nextSticker.className = "live-sticker";
+      nextSticker.style.touchAction = "none";
+      nextSticker.style.userSelect = "none";
+      nextSticker.style.webkitUserSelect = "none";
 
       let nextVideo = null;
       let nextCanvas = null;
