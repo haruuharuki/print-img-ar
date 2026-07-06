@@ -1,0 +1,601 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Alpha Mask WebGL Diagnostic</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #111318;
+      --panel: #1d222b;
+      --panel-strong: #252c37;
+      --text: #f5f7fb;
+      --muted: #b9c1cf;
+      --accent: #31d0aa;
+      --danger: #ff6b6b;
+      --line: rgba(255, 255, 255, 0.14);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        linear-gradient(45deg, #cfd6df 25%, transparent 25%),
+        linear-gradient(-45deg, #cfd6df 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #cfd6df 75%),
+        linear-gradient(-45deg, transparent 75%, #cfd6df 75%);
+      background-color: #7d8794;
+      background-position: 0 0, 0 18px, 18px -18px, -18px 0;
+      background-size: 36px 36px;
+    }
+
+    .page {
+      min-height: 100vh;
+      padding: max(18px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) max(18px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left));
+      background: rgba(10, 12, 16, 0.26);
+    }
+
+    .wrap {
+      width: min(1180px, 100%);
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: minmax(280px, 720px) minmax(280px, 1fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    header {
+      grid-column: 1 / -1;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: end;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(1.4rem, 3vw, 2.15rem);
+      line-height: 1.08;
+      letter-spacing: 0;
+    }
+
+    .subtitle {
+      margin: 7px 0 0;
+      color: var(--muted);
+      font-size: 0.98rem;
+    }
+
+    .stage {
+      width: 100%;
+      aspect-ratio: 720 / 1018;
+      border: 1px solid rgba(255, 255, 255, 0.28);
+      background:
+        linear-gradient(45deg, #dfe4eb 25%, transparent 25%),
+        linear-gradient(-45deg, #dfe4eb 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #dfe4eb 75%),
+        linear-gradient(-45deg, transparent 75%, #dfe4eb 75%);
+      background-color: #8d98a7;
+      background-position: 0 0, 0 20px, 20px -20px, -20px 0;
+      background-size: 40px 40px;
+      box-shadow: 0 24px 70px rgba(0, 0, 0, 0.34);
+      overflow: hidden;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(29, 34, 43, 0.94);
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.28);
+      overflow: hidden;
+    }
+
+    .controls {
+      padding: 16px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .button-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    button {
+      appearance: none;
+      min-height: 52px;
+      border: 0;
+      border-radius: 8px;
+      padding: 12px 15px;
+      color: #061310;
+      background: var(--accent);
+      font: 800 1rem/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      cursor: pointer;
+      touch-action: manipulation;
+    }
+
+    button.secondary {
+      color: var(--text);
+      background: var(--panel-strong);
+      border: 1px solid var(--line);
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.48;
+    }
+
+    .status {
+      min-height: 48px;
+      padding: 12px;
+      border-radius: 8px;
+      background: #12161d;
+      color: var(--muted);
+      line-height: 1.35;
+      word-break: break-word;
+    }
+
+    .status.ok {
+      color: #9af1d9;
+    }
+
+    .status.error {
+      color: var(--danger);
+    }
+
+    .diag {
+      border-top: 1px solid var(--line);
+      padding: 12px 16px 16px;
+    }
+
+    .diag h2 {
+      margin: 0 0 10px;
+      font-size: 1rem;
+      letter-spacing: 0;
+    }
+
+    dl {
+      margin: 0;
+      display: grid;
+      grid-template-columns: minmax(130px, 0.7fr) minmax(130px, 1fr);
+      gap: 7px 12px;
+      font-size: 0.9rem;
+    }
+
+    dt {
+      color: var(--muted);
+    }
+
+    dd {
+      margin: 0;
+      overflow-wrap: anywhere;
+      font-variant-numeric: tabular-nums;
+    }
+
+    video {
+      position: fixed;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+      transform: translate(-100vw, -100vh);
+    }
+
+    @media (max-width: 840px) {
+      .wrap {
+        grid-template-columns: 1fr;
+      }
+
+      header {
+        display: block;
+      }
+
+      .stage {
+        max-height: 64vh;
+        width: auto;
+        max-width: 100%;
+        margin: 0 auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <main class="wrap">
+      <header>
+        <div>
+          <h1>Alpha Mask WebGL Diagnostic</h1>
+          <p class="subtitle">Composites RGB color video with a luminance alpha video.</p>
+        </div>
+      </header>
+
+      <section class="stage" aria-label="Transparent character on checkerboard">
+        <canvas id="glCanvas" width="720" height="1018"></canvas>
+      </section>
+
+      <section class="panel" aria-label="Diagnostics">
+        <div class="controls">
+          <div class="button-row">
+            <button id="playButton" type="button">Play</button>
+            <button id="restartButton" class="secondary" type="button">Restart</button>
+          </div>
+          <div id="status" class="status">Initializing WebGL and video sources...</div>
+        </div>
+        <div class="diag">
+          <h2>Diagnostics</h2>
+          <dl>
+            <dt>WebGL</dt>
+            <dd id="webglSupport">Checking...</dd>
+            <dt>canPlayType(mp4)</dt>
+            <dd id="canPlayMp4">Checking...</dd>
+            <dt>Color readyState</dt>
+            <dd id="colorReady">0</dd>
+            <dt>Alpha readyState</dt>
+            <dd id="alphaReady">0</dd>
+            <dt>Color currentTime</dt>
+            <dd id="colorTime">0.000</dd>
+            <dt>Alpha currentTime</dt>
+            <dd id="alphaTime">0.000</dd>
+            <dt>Time difference</dt>
+            <dd id="timeDiff">0.000</dd>
+            <dt>Color dimensions</dt>
+            <dd id="colorDims">0 x 0</dd>
+            <dt>Alpha dimensions</dt>
+            <dd id="alphaDims">0 x 0</dd>
+            <dt>User agent</dt>
+            <dd id="userAgent"></dd>
+          </dl>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <video id="colorVideo" muted loop playsinline webkit-playsinline preload="auto">
+    <source src="assets/overlays/alpha-proof/nuwa-color.mp4" type="video/mp4">
+  </video>
+  <video id="alphaVideo" muted loop playsinline webkit-playsinline preload="auto">
+    <source src="assets/overlays/alpha-proof/nuwa-alpha.mp4" type="video/mp4">
+  </video>
+
+  <script>
+    (function () {
+      "use strict";
+
+      var canvas = document.getElementById("glCanvas");
+      var colorVideo = document.getElementById("colorVideo");
+      var alphaVideo = document.getElementById("alphaVideo");
+      var playButton = document.getElementById("playButton");
+      var restartButton = document.getElementById("restartButton");
+      var statusEl = document.getElementById("status");
+      var diag = {
+        webglSupport: document.getElementById("webglSupport"),
+        canPlayMp4: document.getElementById("canPlayMp4"),
+        colorReady: document.getElementById("colorReady"),
+        alphaReady: document.getElementById("alphaReady"),
+        colorTime: document.getElementById("colorTime"),
+        alphaTime: document.getElementById("alphaTime"),
+        timeDiff: document.getElementById("timeDiff"),
+        colorDims: document.getElementById("colorDims"),
+        alphaDims: document.getElementById("alphaDims"),
+        userAgent: document.getElementById("userAgent")
+      };
+
+      var gl = canvas.getContext("webgl", {
+        alpha: true,
+        premultipliedAlpha: false,
+        antialias: true
+      });
+      var program = null;
+      var colorTexture = null;
+      var alphaTexture = null;
+      var locations = null;
+      var animationFrame = 0;
+      var lastSyncAt = 0;
+      var hasDrawnFrame = false;
+
+      colorVideo.muted = true;
+      alphaVideo.muted = true;
+      colorVideo.setAttribute("playsinline", "");
+      alphaVideo.setAttribute("playsinline", "");
+      colorVideo.setAttribute("webkit-playsinline", "");
+      alphaVideo.setAttribute("webkit-playsinline", "");
+
+      diag.userAgent.textContent = navigator.userAgent;
+      diag.canPlayMp4.textContent = colorVideo.canPlayType("video/mp4") || "no";
+      diag.webglSupport.textContent = gl ? "supported" : "not supported";
+
+      function setStatus(message, kind) {
+        statusEl.textContent = message;
+        statusEl.className = "status" + (kind ? " " + kind : "");
+      }
+
+      function compileShader(type, source) {
+        var shader = gl.createShader(type);
+        gl.shaderSource(shader, source);
+        gl.compileShader(shader);
+        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+          var message = gl.getShaderInfoLog(shader) || "Unknown shader compile error";
+          gl.deleteShader(shader);
+          throw new Error(message);
+        }
+        return shader;
+      }
+
+      function createProgram() {
+        var vertexSource = [
+          "attribute vec2 a_position;",
+          "attribute vec2 a_texCoord;",
+          "varying vec2 v_texCoord;",
+          "void main() {",
+          "  gl_Position = vec4(a_position, 0.0, 1.0);",
+          "  v_texCoord = a_texCoord;",
+          "}"
+        ].join("\n");
+
+        var fragmentSource = [
+          "precision mediump float;",
+          "uniform sampler2D u_color;",
+          "uniform sampler2D u_alpha;",
+          "varying vec2 v_texCoord;",
+          "void main() {",
+          "  vec4 color = texture2D(u_color, v_texCoord);",
+          "  vec4 alpha = texture2D(u_alpha, v_texCoord);",
+          "  gl_FragColor = vec4(color.rgb, alpha.r);",
+          "}"
+        ].join("\n");
+
+        var vertexShader = compileShader(gl.VERTEX_SHADER, vertexSource);
+        var fragmentShader = compileShader(gl.FRAGMENT_SHADER, fragmentSource);
+        var linkedProgram = gl.createProgram();
+        gl.attachShader(linkedProgram, vertexShader);
+        gl.attachShader(linkedProgram, fragmentShader);
+        gl.linkProgram(linkedProgram);
+        gl.deleteShader(vertexShader);
+        gl.deleteShader(fragmentShader);
+
+        if (!gl.getProgramParameter(linkedProgram, gl.LINK_STATUS)) {
+          var message = gl.getProgramInfoLog(linkedProgram) || "Unknown program link error";
+          gl.deleteProgram(linkedProgram);
+          throw new Error(message);
+        }
+        return linkedProgram;
+      }
+
+      function createVideoTexture() {
+        var texture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(
+          gl.TEXTURE_2D,
+          0,
+          gl.RGBA,
+          1,
+          1,
+          0,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          new Uint8Array([0, 0, 0, 0])
+        );
+        return texture;
+      }
+
+      function initWebGL() {
+        if (!gl) {
+          playButton.disabled = true;
+          restartButton.disabled = true;
+          setStatus("WebGL 1 is not supported in this browser.", "error");
+          return false;
+        }
+
+        program = createProgram();
+        locations = {
+          position: gl.getAttribLocation(program, "a_position"),
+          texCoord: gl.getAttribLocation(program, "a_texCoord"),
+          color: gl.getUniformLocation(program, "u_color"),
+          alpha: gl.getUniformLocation(program, "u_alpha")
+        };
+
+        var positionBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+          -1, -1,
+           1, -1,
+          -1,  1,
+          -1,  1,
+           1, -1,
+           1,  1
+        ]), gl.STATIC_DRAW);
+
+        var texCoordBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+          0, 1,
+          1, 1,
+          0, 0,
+          0, 0,
+          1, 1,
+          1, 0
+        ]), gl.STATIC_DRAW);
+
+        gl.useProgram(program);
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        gl.enableVertexAttribArray(locations.position);
+        gl.vertexAttribPointer(locations.position, 2, gl.FLOAT, false, 0, 0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, texCoordBuffer);
+        gl.enableVertexAttribArray(locations.texCoord);
+        gl.vertexAttribPointer(locations.texCoord, 2, gl.FLOAT, false, 0, 0);
+
+        colorTexture = createVideoTexture();
+        alphaTexture = createVideoTexture();
+        gl.uniform1i(locations.color, 0);
+        gl.uniform1i(locations.alpha, 1);
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.clearColor(0, 0, 0, 0);
+        return true;
+      }
+
+      function updateTexture(texture, video) {
+        if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
+          return false;
+        }
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        try {
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+          return true;
+        } catch (error) {
+          setStatus("Video texture update failed: " + error.message, "error");
+          return false;
+        }
+      }
+
+      function resizeCanvasToDisplaySize() {
+        var rect = canvas.getBoundingClientRect();
+        var width = Math.max(1, Math.round(rect.width * window.devicePixelRatio));
+        var height = Math.max(1, Math.round(rect.height * window.devicePixelRatio));
+        if (canvas.width !== width || canvas.height !== height) {
+          canvas.width = width;
+          canvas.height = height;
+        }
+        gl.viewport(0, 0, canvas.width, canvas.height);
+      }
+
+      function syncIfNeeded() {
+        var diff = Math.abs(colorVideo.currentTime - alphaVideo.currentTime);
+        var now = performance.now();
+        if (diff > 0.08 && now - lastSyncAt > 250) {
+          alphaVideo.currentTime = colorVideo.currentTime;
+          lastSyncAt = now;
+        }
+      }
+
+      function updateDiagnostics() {
+        var diff = Math.abs(colorVideo.currentTime - alphaVideo.currentTime);
+        diag.colorReady.textContent = String(colorVideo.readyState);
+        diag.alphaReady.textContent = String(alphaVideo.readyState);
+        diag.colorTime.textContent = colorVideo.currentTime.toFixed(3);
+        diag.alphaTime.textContent = alphaVideo.currentTime.toFixed(3);
+        diag.timeDiff.textContent = diff.toFixed(3);
+        diag.colorDims.textContent = colorVideo.videoWidth + " x " + colorVideo.videoHeight;
+        diag.alphaDims.textContent = alphaVideo.videoWidth + " x " + alphaVideo.videoHeight;
+      }
+
+      function draw() {
+        animationFrame = requestAnimationFrame(draw);
+        updateDiagnostics();
+
+        if (!gl || !program) {
+          return;
+        }
+
+        resizeCanvasToDisplaySize();
+        gl.clear(gl.COLOR_BUFFER_BIT);
+
+        if (colorVideo.readyState < 2 || alphaVideo.readyState < 2) {
+          return;
+        }
+
+        syncIfNeeded();
+        var colorUpdated = updateTexture(colorTexture, colorVideo);
+        var alphaUpdated = updateTexture(alphaTexture, alphaVideo);
+        if (!colorUpdated || !alphaUpdated) {
+          return;
+        }
+
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, colorTexture);
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, alphaTexture);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+        if (!hasDrawnFrame) {
+          hasDrawnFrame = true;
+          setStatus("Drawing color RGB with alpha luminance on transparent WebGL canvas.", "ok");
+        }
+      }
+
+      function seekVideo(video, time) {
+        try {
+          video.currentTime = time;
+        } catch (error) {
+          video.addEventListener("loadedmetadata", function () {
+            video.currentTime = time;
+          }, { once: true });
+        }
+      }
+
+      function resetVideosToStart() {
+        seekVideo(colorVideo, 0);
+        seekVideo(alphaVideo, 0);
+        lastSyncAt = performance.now();
+      }
+
+      function playBoth() {
+        setStatus("Starting both videos from 0.000s...", "");
+        hasDrawnFrame = false;
+        resetVideosToStart();
+
+        return Promise.all([
+          colorVideo.play().catch(function (error) {
+            throw new Error("Color play failed: " + error.message);
+          }),
+          alphaVideo.play().catch(function (error) {
+            throw new Error("Alpha play failed: " + error.message);
+          })
+        ])
+          .then(function () {
+            setStatus("Both videos are playing. Waiting for drawable frames...", "ok");
+          })
+          .catch(function (error) {
+            setStatus("Play failed: " + error.message, "error");
+          });
+      }
+
+      function restartBoth() {
+        resetVideosToStart();
+        if (!colorVideo.paused || !alphaVideo.paused) {
+          playBoth();
+        } else {
+          setStatus("Restarted to 0.000s. Press Play to start.", "");
+        }
+      }
+
+      function handleVideoError(label, event) {
+        var mediaError = event.currentTarget.error;
+        var detail = mediaError ? " code " + mediaError.code : "";
+        setStatus(label + " video error" + detail + ".", "error");
+      }
+
+      colorVideo.addEventListener("error", handleVideoError.bind(null, "Color"));
+      alphaVideo.addEventListener("error", handleVideoError.bind(null, "Alpha"));
+      playButton.addEventListener("click", playBoth);
+      restartButton.addEventListener("click", restartBoth);
+      window.addEventListener("resize", resizeCanvasToDisplaySize);
+
+      if (initWebGL()) {
+        colorVideo.load();
+        alphaVideo.load();
+        draw();
+        playBoth();
+      }
+    })();
+  </script>
+</body>
+</html>
