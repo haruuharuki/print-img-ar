@@ -409,7 +409,9 @@
       } else if (pointers.size === 2) {
         dragStart = {
           distance: pointerDistance(),
-          scale
+          angle: pointerAngle(),
+          scale,
+          rotationDegrees
         };
       }
     }
@@ -424,7 +426,17 @@
         translateY = dragStart.translateY + event.clientY - dragStart.y;
       } else if (pointers.size >= 2 && dragStart && dragStart.distance) {
         const nextDistance = pointerDistance();
-        scale = clamp(dragStart.scale * (nextDistance / dragStart.distance), 0.35, 3);
+        const nextAngle = pointerAngle();
+
+        scale = clamp(
+          dragStart.scale * (nextDistance / dragStart.distance),
+          0.35,
+          3
+        );
+
+        rotationDegrees =
+          dragStart.rotationDegrees +
+          normalizeAngleDegrees(nextAngle - dragStart.angle);
       }
 
       saveSelectedStickerTransform();
@@ -461,6 +473,21 @@
       const dx = points[0].x - points[1].x;
       const dy = points[0].y - points[1].y;
       return Math.hypot(dx, dy) || 1;
+    }
+
+    function pointerAngle() {
+      const points = [...pointers.values()];
+      if (points.length < 2) return 0;
+      const dx = points[1].x - points[0].x;
+      const dy = points[1].y - points[0].y;
+      return Math.atan2(dy, dx) * (180 / Math.PI);
+    }
+
+    function normalizeAngleDegrees(value) {
+      let normalized = value;
+      while (normalized > 180) normalized -= 360;
+      while (normalized < -180) normalized += 360;
+      return normalized;
     }
 
     function createSelectionBox() {
