@@ -3,11 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Alpha Mask WebGL Diagnostic</title>
+  <title>Packed Alpha Mask WebGL Diagnostic</title>
   <style>
     :root {
       color-scheme: dark;
-      --bg: #111318;
       --panel: #1d222b;
       --panel-strong: #252c37;
       --text: #f5f7fb;
@@ -218,8 +217,8 @@
     <main class="wrap">
       <header>
         <div>
-          <h1>Alpha Mask WebGL Diagnostic</h1>
-          <p class="subtitle">Composites RGB color video with a luminance alpha video.</p>
+          <h1>Packed Alpha Mask WebGL Diagnostic</h1>
+          <p class="subtitle">Samples color from the top half and alpha from the bottom half of one MP4.</p>
         </div>
       </header>
 
@@ -233,7 +232,7 @@
             <button id="playButton" type="button">Play</button>
             <button id="restartButton" class="secondary" type="button">Restart</button>
           </div>
-          <div id="status" class="status">Initializing WebGL and video sources...</div>
+          <div id="status" class="status">Initializing WebGL and packed video source...</div>
         </div>
         <div class="diag">
           <h2>Diagnostics</h2>
@@ -242,20 +241,14 @@
             <dd id="webglSupport">Checking...</dd>
             <dt>canPlayType(mp4)</dt>
             <dd id="canPlayMp4">Checking...</dd>
-            <dt>Color readyState</dt>
-            <dd id="colorReady">0</dd>
-            <dt>Alpha readyState</dt>
-            <dd id="alphaReady">0</dd>
-            <dt>Color currentTime</dt>
-            <dd id="colorTime">0.000</dd>
-            <dt>Alpha currentTime</dt>
-            <dd id="alphaTime">0.000</dd>
-            <dt>Time difference</dt>
-            <dd id="timeDiff">0.000</dd>
-            <dt>Color dimensions</dt>
-            <dd id="colorDims">0 x 0</dd>
-            <dt>Alpha dimensions</dt>
-            <dd id="alphaDims">0 x 0</dd>
+            <dt>Packed readyState</dt>
+            <dd id="packedReady">0</dd>
+            <dt>Packed currentTime</dt>
+            <dd id="packedTime">0.000</dd>
+            <dt>Packed dimensions</dt>
+            <dd id="packedDims">0 x 0</dd>
+            <dt>Expected layout</dt>
+            <dd id="expectedLayout">top=color, bottom=alpha</dd>
             <dt>User agent</dt>
             <dd id="userAgent"></dd>
           </dl>
@@ -264,11 +257,8 @@
     </main>
   </div>
 
-  <video id="colorVideo" muted loop playsinline webkit-playsinline preload="auto">
-    <source src="assets/overlays/alpha-proof/nuwa-color.mp4" type="video/mp4">
-  </video>
-  <video id="alphaVideo" muted loop playsinline webkit-playsinline preload="auto">
-    <source src="assets/overlays/alpha-proof/nuwa-alpha.mp4" type="video/mp4">
+  <video id="packedVideo" muted loop playsinline webkit-playsinline preload="auto">
+    <source src="assets/overlays/alpha-proof/nuwa-packed.mp4" type="video/mp4">
   </video>
 
   <script>
@@ -276,21 +266,16 @@
       "use strict";
 
       var canvas = document.getElementById("glCanvas");
-      var colorVideo = document.getElementById("colorVideo");
-      var alphaVideo = document.getElementById("alphaVideo");
+      var packedVideo = document.getElementById("packedVideo");
       var playButton = document.getElementById("playButton");
       var restartButton = document.getElementById("restartButton");
       var statusEl = document.getElementById("status");
       var diag = {
         webglSupport: document.getElementById("webglSupport"),
         canPlayMp4: document.getElementById("canPlayMp4"),
-        colorReady: document.getElementById("colorReady"),
-        alphaReady: document.getElementById("alphaReady"),
-        colorTime: document.getElementById("colorTime"),
-        alphaTime: document.getElementById("alphaTime"),
-        timeDiff: document.getElementById("timeDiff"),
-        colorDims: document.getElementById("colorDims"),
-        alphaDims: document.getElementById("alphaDims"),
+        packedReady: document.getElementById("packedReady"),
+        packedTime: document.getElementById("packedTime"),
+        packedDims: document.getElementById("packedDims"),
         userAgent: document.getElementById("userAgent")
       };
 
@@ -300,22 +285,17 @@
         antialias: true
       });
       var program = null;
-      var colorTexture = null;
-      var alphaTexture = null;
+      var packedTexture = null;
       var locations = null;
       var animationFrame = 0;
-      var lastSyncAt = 0;
       var hasDrawnFrame = false;
 
-      colorVideo.muted = true;
-      alphaVideo.muted = true;
-      colorVideo.setAttribute("playsinline", "");
-      alphaVideo.setAttribute("playsinline", "");
-      colorVideo.setAttribute("webkit-playsinline", "");
-      alphaVideo.setAttribute("webkit-playsinline", "");
+      packedVideo.muted = true;
+      packedVideo.setAttribute("playsinline", "");
+      packedVideo.setAttribute("webkit-playsinline", "");
 
       diag.userAgent.textContent = navigator.userAgent;
-      diag.canPlayMp4.textContent = colorVideo.canPlayType("video/mp4") || "no";
+      diag.canPlayMp4.textContent = packedVideo.canPlayType("video/mp4") || "no";
       diag.webglSupport.textContent = gl ? "supported" : "not supported";
 
       function setStatus(message, kind) {
@@ -348,12 +328,13 @@
 
         var fragmentSource = [
           "precision mediump float;",
-          "uniform sampler2D u_color;",
-          "uniform sampler2D u_alpha;",
+          "uniform sampler2D u_packed;",
           "varying vec2 v_texCoord;",
           "void main() {",
-          "  vec4 color = texture2D(u_color, v_texCoord);",
-          "  vec4 alpha = texture2D(u_alpha, v_texCoord);",
+          "  vec2 colorUV = vec2(v_texCoord.x, v_texCoord.y * 0.5);",
+          "  vec2 alphaUV = vec2(v_texCoord.x, 0.5 + (v_texCoord.y * 0.5));",
+          "  vec4 color = texture2D(u_packed, colorUV);",
+          "  vec4 alpha = texture2D(u_packed, alphaUV);",
           "  gl_FragColor = vec4(color.rgb, alpha.r);",
           "}"
         ].join("\n");
@@ -378,6 +359,7 @@
       function createVideoTexture() {
         var texture = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -408,8 +390,7 @@
         locations = {
           position: gl.getAttribLocation(program, "a_position"),
           texCoord: gl.getAttribLocation(program, "a_texCoord"),
-          color: gl.getUniformLocation(program, "u_color"),
-          alpha: gl.getUniformLocation(program, "u_alpha")
+          packed: gl.getUniformLocation(program, "u_packed")
         };
 
         var positionBuffer = gl.createBuffer();
@@ -442,10 +423,8 @@
         gl.enableVertexAttribArray(locations.texCoord);
         gl.vertexAttribPointer(locations.texCoord, 2, gl.FLOAT, false, 0, 0);
 
-        colorTexture = createVideoTexture();
-        alphaTexture = createVideoTexture();
-        gl.uniform1i(locations.color, 0);
-        gl.uniform1i(locations.alpha, 1);
+        packedTexture = createVideoTexture();
+        gl.uniform1i(locations.packed, 0);
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         gl.clearColor(0, 0, 0, 0);
@@ -461,7 +440,7 @@
           gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
           return true;
         } catch (error) {
-          setStatus("Video texture update failed: " + error.message, "error");
+          setStatus("Packed video texture update failed: " + error.message, "error");
           return false;
         }
       }
@@ -477,24 +456,10 @@
         gl.viewport(0, 0, canvas.width, canvas.height);
       }
 
-      function syncIfNeeded() {
-        var diff = Math.abs(colorVideo.currentTime - alphaVideo.currentTime);
-        var now = performance.now();
-        if (diff > 0.08 && now - lastSyncAt > 250) {
-          alphaVideo.currentTime = colorVideo.currentTime;
-          lastSyncAt = now;
-        }
-      }
-
       function updateDiagnostics() {
-        var diff = Math.abs(colorVideo.currentTime - alphaVideo.currentTime);
-        diag.colorReady.textContent = String(colorVideo.readyState);
-        diag.alphaReady.textContent = String(alphaVideo.readyState);
-        diag.colorTime.textContent = colorVideo.currentTime.toFixed(3);
-        diag.alphaTime.textContent = alphaVideo.currentTime.toFixed(3);
-        diag.timeDiff.textContent = diff.toFixed(3);
-        diag.colorDims.textContent = colorVideo.videoWidth + " x " + colorVideo.videoHeight;
-        diag.alphaDims.textContent = alphaVideo.videoWidth + " x " + alphaVideo.videoHeight;
+        diag.packedReady.textContent = String(packedVideo.readyState);
+        diag.packedTime.textContent = packedVideo.currentTime.toFixed(3);
+        diag.packedDims.textContent = packedVideo.videoWidth + " x " + packedVideo.videoHeight;
       }
 
       function draw() {
@@ -508,92 +473,117 @@
         resizeCanvasToDisplaySize();
         gl.clear(gl.COLOR_BUFFER_BIT);
 
-        if (colorVideo.readyState < 2 || alphaVideo.readyState < 2) {
-          return;
-        }
-
-        syncIfNeeded();
-        var colorUpdated = updateTexture(colorTexture, colorVideo);
-        var alphaUpdated = updateTexture(alphaTexture, alphaVideo);
-        if (!colorUpdated || !alphaUpdated) {
+        if (!updateTexture(packedTexture, packedVideo)) {
           return;
         }
 
         gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, colorTexture);
-        gl.activeTexture(gl.TEXTURE1);
-        gl.bindTexture(gl.TEXTURE_2D, alphaTexture);
+        gl.bindTexture(gl.TEXTURE_2D, packedTexture);
         gl.drawArrays(gl.TRIANGLES, 0, 6);
 
         if (!hasDrawnFrame) {
           hasDrawnFrame = true;
-          setStatus("Drawing color RGB with alpha luminance on transparent WebGL canvas.", "ok");
+          setStatus("Drawing packed MP4: top half as RGB, bottom half as alpha.", "ok");
         }
+      }
+
+      function waitForMetadata(video) {
+        if (video.readyState >= 1) {
+          return Promise.resolve();
+        }
+        return new Promise(function (resolve, reject) {
+          video.addEventListener("loadedmetadata", resolve, { once: true });
+          video.addEventListener("error", function () {
+            reject(new Error("Metadata load failed."));
+          }, { once: true });
+        });
       }
 
       function seekVideo(video, time) {
-        try {
-          video.currentTime = time;
-        } catch (error) {
-          video.addEventListener("loadedmetadata", function () {
-            video.currentTime = time;
-          }, { once: true });
-        }
+        return waitForMetadata(video).then(function () {
+          return new Promise(function (resolve, reject) {
+            var settled = false;
+            var fallback = window.setTimeout(function () {
+              if (!settled && Math.abs(video.currentTime - time) < 0.01) {
+                settled = true;
+                resolve();
+              }
+            }, 900);
+
+            video.addEventListener("seeked", function () {
+              if (!settled) {
+                settled = true;
+                window.clearTimeout(fallback);
+                resolve();
+              }
+            }, { once: true });
+
+            video.addEventListener("error", function () {
+              if (!settled) {
+                settled = true;
+                window.clearTimeout(fallback);
+                reject(new Error("Seek failed."));
+              }
+            }, { once: true });
+
+            try {
+              video.currentTime = time;
+            } catch (error) {
+              settled = true;
+              window.clearTimeout(fallback);
+              reject(error);
+            }
+          });
+        });
       }
 
-      function resetVideosToStart() {
-        seekVideo(colorVideo, 0);
-        seekVideo(alphaVideo, 0);
-        lastSyncAt = performance.now();
-      }
-
-      function playBoth() {
-        setStatus("Starting both videos from 0.000s...", "");
+      function playPacked() {
+        setStatus("Starting packed video from 0.000s...", "");
         hasDrawnFrame = false;
-        resetVideosToStart();
+        packedVideo.pause();
 
-        return Promise.all([
-          colorVideo.play().catch(function (error) {
-            throw new Error("Color play failed: " + error.message);
-          }),
-          alphaVideo.play().catch(function (error) {
-            throw new Error("Alpha play failed: " + error.message);
-          })
-        ])
+        return seekVideo(packedVideo, 0)
           .then(function () {
-            setStatus("Both videos are playing. Waiting for drawable frames...", "ok");
+            return packedVideo.play();
+          })
+          .then(function () {
+            setStatus("Packed video is playing. Waiting for drawable frames...", "ok");
           })
           .catch(function (error) {
             setStatus("Play failed: " + error.message, "error");
           });
       }
 
-      function restartBoth() {
-        resetVideosToStart();
-        if (!colorVideo.paused || !alphaVideo.paused) {
-          playBoth();
-        } else {
-          setStatus("Restarted to 0.000s. Press Play to start.", "");
-        }
+      function restartPacked() {
+        hasDrawnFrame = false;
+        seekVideo(packedVideo, 0)
+          .then(function () {
+            if (!packedVideo.paused) {
+              return packedVideo.play();
+            }
+            setStatus("Restarted to 0.000s. Press Play to start.", "");
+            return null;
+          })
+          .catch(function (error) {
+            setStatus("Restart failed: " + error.message, "error");
+          });
       }
 
-      function handleVideoError(label, event) {
+      function handleVideoError(event) {
         var mediaError = event.currentTarget.error;
         var detail = mediaError ? " code " + mediaError.code : "";
-        setStatus(label + " video error" + detail + ".", "error");
+        setStatus("Packed video error" + detail + ".", "error");
       }
 
-      colorVideo.addEventListener("error", handleVideoError.bind(null, "Color"));
-      alphaVideo.addEventListener("error", handleVideoError.bind(null, "Alpha"));
-      playButton.addEventListener("click", playBoth);
-      restartButton.addEventListener("click", restartBoth);
+      packedVideo.addEventListener("error", handleVideoError);
+      playButton.addEventListener("click", playPacked);
+      restartButton.addEventListener("click", restartPacked);
       window.addEventListener("resize", resizeCanvasToDisplaySize);
 
       if (initWebGL()) {
-        colorVideo.load();
-        alphaVideo.load();
+        packedVideo.load();
         draw();
-        playBoth();
+        playPacked();
       }
     })();
   </script>
