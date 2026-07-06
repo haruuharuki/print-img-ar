@@ -168,6 +168,7 @@
         this.videoTexture.wrapS = THREE.ClampToEdgeWrapping;
         this.videoTexture.wrapT = THREE.ClampToEdgeWrapping;
         this.videoTexture.generateMipmaps = false;
+        this.videoTexture.flipY = false;
 
         this.shaderMaterial = new THREE.ShaderMaterial({
           uniforms: {
@@ -176,7 +177,7 @@
           vertexShader: [
             "varying vec2 vUv;",
             "void main() {",
-            "  vUv = uv;",
+            "  vUv = vec2(uv.x, 1.0 - uv.y);",
             "  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);",
             "}"
           ].join("\n"),
