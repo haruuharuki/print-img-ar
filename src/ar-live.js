@@ -980,6 +980,9 @@
     const context = canvas.getContext("2d");
     const maskCanvas = document.createElement("canvas");
     const maskContext = maskCanvas.getContext("2d");
+    const isTouchDevice = window.matchMedia &&
+      window.matchMedia("(pointer: coarse)").matches;
+    const renderScale = isTouchDevice ? 0.7 : 1;
     let animationFrame = null;
 
     function drawFrame() {
@@ -990,20 +993,45 @@
         return;
       }
 
-      if (canvas.width !== sourceWidth || canvas.height !== sourceHeight) {
-        canvas.width = sourceWidth;
-        canvas.height = sourceHeight;
-        maskCanvas.width = sourceWidth;
-        maskCanvas.height = sourceHeight;
+      const renderWidth = Math.max(1, Math.round(sourceWidth * renderScale));
+      const renderHeight = Math.max(1, Math.round(sourceHeight * renderScale));
+
+      if (canvas.width !== renderWidth || canvas.height !== renderHeight) {
+        canvas.width = renderWidth;
+        canvas.height = renderHeight;
+        maskCanvas.width = renderWidth;
+        maskCanvas.height = renderHeight;
       }
 
-      context.clearRect(0, 0, sourceWidth, sourceHeight);
-      maskContext.clearRect(0, 0, sourceWidth, sourceHeight);
-      context.drawImage(video, 0, 0, sourceWidth, sourceHeight, 0, 0, sourceWidth, sourceHeight);
-      maskContext.drawImage(video, 0, sourceHeight, sourceWidth, sourceHeight, 0, 0, sourceWidth, sourceHeight);
+      context.clearRect(0, 0, renderWidth, renderHeight);
+      maskContext.clearRect(0, 0, renderWidth, renderHeight);
 
-      const color = context.getImageData(0, 0, sourceWidth, sourceHeight);
-      const mask = maskContext.getImageData(0, 0, sourceWidth, sourceHeight);
+      context.drawImage(
+        video,
+        0,
+        0,
+        sourceWidth,
+        sourceHeight,
+        0,
+        0,
+        renderWidth,
+        renderHeight
+      );
+
+      maskContext.drawImage(
+        video,
+        0,
+        sourceHeight,
+        sourceWidth,
+        sourceHeight,
+        0,
+        0,
+        renderWidth,
+        renderHeight
+      );
+
+      const color = context.getImageData(0, 0, renderWidth, renderHeight);
+      const mask = maskContext.getImageData(0, 0, renderWidth, renderHeight);
       const colorPixels = color.data;
       const maskPixels = mask.data;
 
