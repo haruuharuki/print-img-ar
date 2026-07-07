@@ -24,7 +24,7 @@
         "muted": true,
         "playsInline": true
       },
-      "updatedAt": "2026-07-07T08:48:07Z"
+      "updatedAt": "2026-07-04T00:00:00Z"
     },
     {
       "id": "nuwa",
@@ -96,7 +96,7 @@
         "muted": true,
         "playsInline": true
       },
-      "updatedAt": "2026-07-07T08:47:20.463Z",
+      "updatedAt": "2026-07-07T08:53:27.989Z",
       "overlayPackedPath": "./assets/overlays/luk-jia2-packed.mp4",
       "overlayMode": "auto-alpha"
     }
