@@ -56,7 +56,7 @@
       "enabled": true,
       "targetIndex": 2,
       "imagePath": "./assets/targets/lignice.png",
-      "overlayPath": "./assets/overlays/lignice.webm",
+      "overlayPath": "https://pub-91ea9853cab9485495948b49cc3f67a3.r2.dev/overlays/lignice/pose-01/lignice.webm",
       "overlayType": "video",
       "overlay": {
         "width": 1.519,
@@ -71,10 +71,10 @@
         "playsInline": true
       },
       "updatedAt": "2026-07-07T07:00:57Z",
-      "overlayPackedPath": "./assets/overlays/lignice-packed.mp4",
+      "overlayPackedPath": "https://pub-91ea9853cab9485495948b49cc3f67a3.r2.dev/overlays/lignice/pose-01/lignice-packed.mp4",
       "overlayMode": "auto-alpha",
-      "overlayLoopPath": "./assets/overlays/lignice-loop.webm",
-      "overlayLoopPackedPath": "./assets/overlays/lignice-loop-packed.mp4"
+      "overlayLoopPath": "https://pub-91ea9853cab9485495948b49cc3f67a3.r2.dev/overlays/lignice/pose-01/lignice-loop.webm",
+      "overlayLoopPackedPath": "https://pub-91ea9853cab9485495948b49cc3f67a3.r2.dev/overlays/lignice/pose-01/lignice-loop-packed.mp4"
     },
     {
       "id": "luk-jia2",
