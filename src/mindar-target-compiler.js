@@ -2,7 +2,7 @@
   const COMPILER_MODULE_URL = "https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image.prod.js";
   const MAX_TARGET_EDGE = 1200;
   const MAX_TARGET_PIXELS = 1400000;
-  const MAX_ACTIVE_TARGETS = 10;
+  const MAX_ACTIVE_TARGETS = 15;
   const MAX_OVERLAY_FILE_BYTES = 95 * 1024 * 1024;
   const SUPPORTED_OVERLAY_EXTENSIONS = new Set([".mp4", ".mov", ".webm"]);
   const OVERLAY_MIME_BY_EXTENSION = {
@@ -1037,6 +1037,26 @@
     return message;
   }
 
+  function optimizerErrorMessage(error, sourceFile) {
+    const parts = [];
+    if (error && error.stage && error.stage !== "overlay") {
+      parts.push(`${error.stage} video`);
+    }
+    const fileName = (error && error.fileName) || (sourceFile && sourceFile.name);
+    if (fileName) {
+      parts.push(fileName);
+    }
+
+    const message = error && error.error ? error.error : "optimizer convert failed";
+    const detail = error && error.details && error.details.stderr
+      ? ` ${String(error.details.stderr).slice(-1200)}`
+      : "";
+
+    return parts.length
+      ? `${parts.join(" - ")}: ${message}${detail}`
+      : `${message}${detail}`;
+  }
+
   async function optimizeOverlayForPreview() {
     if (!sourceOverlayFile || !optimizerAvailable) return;
     const shouldConvertLoop = isIntroLoopModeEnabled() && Boolean(sourceLoopOverlayFile);
@@ -1057,12 +1077,12 @@
     selectedLoopPackedOverlayFile = null;
 
     try {
-      const introResult = await requestOverlayOptimization(sourceOverlayFile);
+      const introResult = await requestOverlayOptimization(sourceOverlayFile, shouldConvertLoop ? "intro" : "overlay");
       let loopResult = null;
 
       if (shouldConvertLoop) {
         optimizerStatus.textContent = "Converting loop video with FFmpeg...";
-        loopResult = await requestOverlayOptimization(sourceLoopOverlayFile);
+        loopResult = await requestOverlayOptimization(sourceLoopOverlayFile, "loop");
       }
 
       selectedOverlayFile = introResult.file;
@@ -1132,9 +1152,10 @@
       : "";
   }
 
-  async function requestOverlayOptimization(sourceFile) {
+  async function requestOverlayOptimization(sourceFile, stage = "overlay") {
     const form = new FormData();
     form.append("overlayVideo", sourceFile, sourceFile.name);
+    form.append("stage", stage);
     form.append("resolution", optimizerResolution.value);
     form.append("frameRate", optimizerFrameRate.value);
     form.append("quality", optimizerQuality.value);
@@ -1148,7 +1169,7 @@
       let message = "optimizer convert failed";
       try {
         const error = await response.json();
-        message = error.error || message;
+        message = optimizerErrorMessage(error, sourceFile);
       } catch (_error) {
         message = await response.text();
       }
@@ -1204,7 +1225,11 @@
         { type: "video/mp4" }
       );
     } else if (packedError) {
-      throw new Error(`Packed alpha conversion failed: ${packedError}`);
+      throw new Error(optimizerErrorMessage({
+        error: `Packed alpha conversion failed: ${packedError}`,
+        stage,
+        fileName: sourceFile.name
+      }, sourceFile));
     }
 
     return {

@@ -24,7 +24,7 @@ OVERLAYS_DIR = ROOT / "assets" / "overlays"
 TARGETS_MIND_PATH = ROOT / "assets" / "targets.mind"
 DELETED_DIR = ROOT / "assets" / "_deleted"
 COMMIT_MESSAGE = "Update AR overlay config"
-MAX_ACTIVE_TARGETS = 10
+MAX_ACTIVE_TARGETS = 15
 MAX_MULTIPART_BYTES = 120 * 1024 * 1024
 MAX_OPTIMIZER_INPUT_BYTES = 2 * 1024 * 1024 * 1024
 DELETED_RETENTION_DAYS = 7
@@ -131,9 +131,20 @@ class CreatorHelperHandler(SimpleHTTPRequestHandler):
                     optimizer_response_headers(result),
                 )
             except DeployError as error:
+                payload = {"ok": False, "error": str(error), "details": error.details}
+                if error.details.get("stage"):
+                    payload["stage"] = error.details["stage"]
+                if error.details.get("fileName"):
+                    payload["fileName"] = error.details["fileName"]
+                self.send_json(payload, status=error.status)
+            except UnicodeDecodeError as error:
                 self.send_json(
-                    {"ok": False, "error": str(error), "details": error.details},
-                    status=error.status,
+                    {
+                        "ok": False,
+                        "error": "Optimizer output could not be decoded safely.",
+                        "details": {"message": str(error)},
+                    },
+                    status=500,
                 )
             except Exception as error:
                 self.send_json(
@@ -462,6 +473,17 @@ def deploy_overlay(payload):
     }
 
 
+def run_subprocess_text(command, cwd=ROOT):
+    return subprocess.run(
+        command,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+
 def optimizer_status():
     ffmpeg_path = shutil.which("ffmpeg")
     ffprobe_path = shutil.which("ffprobe")
@@ -605,6 +627,7 @@ def optimize_overlay_video(form):
         raise DeployError(status["installHint"], status=409)
 
     overlay_video = required_form_file(form, "overlayVideo")
+    stage = optimizer_stage(optional_form_text(form, "stage"))
     resolution = optimizer_choice(required_form_text(form, "resolution"), {"720", "1080"}, "resolution")
     frame_rate = optimizer_choice(required_form_text(form, "frameRate"), {"24", "30"}, "frameRate")
     quality = optimizer_choice(required_form_text(form, "quality"), {"small", "balanced", "high"}, "quality")
@@ -647,12 +670,17 @@ def optimize_overlay_video(form):
             "1",
             str(output_path),
         ]
-        result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+        result = run_subprocess_text(command)
         if result.returncode != 0:
             raise DeployError(
                 "FFmpeg conversion failed.",
                 status=500,
-                details={"stderr": tail_output(result.stdout, result.stderr), "returncode": result.returncode},
+                details={
+                    "stage": stage,
+                    "fileName": overlay_video.filename,
+                    "stderr": tail_output(result.stdout, result.stderr),
+                    "returncode": result.returncode,
+                },
             )
         if not output_path.exists() or output_path.stat().st_size <= 0:
             raise DeployError("FFmpeg did not create an optimized video.", status=500)
@@ -733,7 +761,7 @@ def input_alpha_status(input_path, ffprobe_path):
         "json",
         str(input_path),
     ]
-    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+    result = run_subprocess_text(command)
     if result.returncode != 0:
         return {
             "hasAlpha": False,
@@ -805,7 +833,7 @@ def create_packed_alpha_mp4(input_path, output_path, resolution, frame_rate, ffm
         "+faststart",
         str(output_path),
     ]
-    result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+    result = run_subprocess_text(command)
     if result.returncode != 0:
         raise DeployError(
             "FFmpeg packed alpha conversion failed.",
@@ -826,6 +854,13 @@ def optimizer_choice(value, allowed, label):
     text = str(value or "").strip()
     if text not in allowed:
         raise DeployError(f"Invalid optimizer {label}.", details={"value": value, "allowed": sorted(allowed)})
+    return text
+
+
+def optimizer_stage(value):
+    text = str(value or "overlay").strip().lower()
+    if text not in {"overlay", "intro", "loop"}:
+        return "overlay"
     return text
 
 
@@ -1357,12 +1392,7 @@ def deploy_set_has_changes(paths):
     for path in paths:
         if not is_tracked(path):
             return True
-    result = subprocess.run(
-        ["git", "diff", "--quiet", "--", *paths],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-    )
+    result = run_subprocess_text(["git", "diff", "--quiet", "--", *paths])
     if result.returncode == 1:
         return True
     if result.returncode == 0:
@@ -1377,7 +1407,7 @@ def deploy_set_has_changes(paths):
 def unstage_files(paths):
     if not paths:
         return
-    result = subprocess.run(["git", "restore", "--staged", "--", *paths], cwd=ROOT, capture_output=True, text=True)
+    result = run_subprocess_text(["git", "restore", "--staged", "--", *paths])
     if result.returncode != 0:
         raise DeployError(
             "git restore --staged failed.",
@@ -1387,7 +1417,7 @@ def unstage_files(paths):
 
 
 def unstage_all():
-    result = subprocess.run(["git", "restore", "--staged", "--", "."], cwd=ROOT, capture_output=True, text=True)
+    result = run_subprocess_text(["git", "restore", "--staged", "--", "."])
     if result.returncode != 0:
         raise DeployError(
             "git restore --staged -- . failed.",
@@ -1479,6 +1509,13 @@ def required_form_text(form, name):
     if value is None or value == "":
         raise DeployError(f"Missing form field: {name}")
     return value
+
+
+def optional_form_text(form, name):
+    field = form[name] if name in form else None
+    if field is None or getattr(field, "file", None) is not None and field.filename:
+        return ""
+    return field.value or ""
 
 
 def required_form_file(form, name):
@@ -1967,12 +2004,7 @@ def ensure_git_ready_for_deploy():
 def path_has_git_changes(include_untracked=False):
     tracked = is_tracked(CONFIG_REPO_PATH)
     if tracked:
-        result = subprocess.run(
-            ["git", "diff", "--quiet", "--", CONFIG_REPO_PATH],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-        )
+        result = run_subprocess_text(["git", "diff", "--quiet", "--", CONFIG_REPO_PATH])
         if result.returncode == 1:
             return True
         if result.returncode not in (0, 1):
@@ -1989,12 +2021,7 @@ def path_has_git_changes(include_untracked=False):
 
 
 def is_tracked(path):
-    result = subprocess.run(
-        ["git", "ls-files", "--error-unmatch", path],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-    )
+    result = run_subprocess_text(["git", "ls-files", "--error-unmatch", path])
     return result.returncode == 0
 
 
@@ -2004,7 +2031,7 @@ def staged_files():
 
 
 def run_git(args):
-    result = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True)
+    result = run_subprocess_text(["git", *args])
     if result.returncode != 0:
         raise DeployError(
             f"git {' '.join(args)} failed.",

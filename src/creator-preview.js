@@ -1099,7 +1099,7 @@
     }
     return library.targets
       .filter((item) => item.enabled)
-      .slice(0, library.maxActiveTargets || 10)
+      .slice(0, library.maxActiveTargets || 15)
       .sort((a, b) => Number(a.targetIndex) - Number(b.targetIndex));
   }
 
