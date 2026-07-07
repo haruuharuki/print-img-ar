@@ -47,11 +47,12 @@
   startButton.textContent = config.ui.startButtonText;
 
   startButton.addEventListener("click", async () => {
+    logViewerDiagnostic("start-click");
     try {
-      await unlockVideos(targetStates);
-
       const mindarSystem = scene.systems["mindar-image-system"];
+      logViewerDiagnostic("camera-start-begin");
       await mindarSystem.start();
+      logViewerDiagnostic("camera-start-success");
 
       hasStarted = true;
       capture && capture.setStarted(true);
@@ -60,7 +61,17 @@
       cameraSwitchButton.disabled = false;
       startButton.classList.add("hidden");
       statusBox.textContent = config.ui.scanningText;
+      unlockVideos(targetStates).catch((error) => {
+        logViewerDiagnostic("video-unlock-warning", {
+          name: error && error.name,
+          message: error && error.message
+        });
+      });
     } catch (error) {
+      logViewerDiagnostic("start-error", {
+        name: error && error.name,
+        message: error && error.message
+      });
       console.error(error);
       statusBox.textContent = `${config.ui.errorText}: ${error.name || "Error"} ${error.message || error}`;
     }
@@ -315,23 +326,32 @@
   }
 
   async function unlockVideos(states) {
-    for (const state of states) {
-      const sources = state.hasVideoSequence
-        ? [state.videoSources.intro, state.videoSources.loop]
-        : [state.videoSources.intro];
-      for (const source of sources.filter(Boolean)) {
-        try {
-          await unlockVideoSource(state.video, source);
-        } catch (error) {
-          console.warn("Video unlock failed", {
-            src: source,
-            name: error && error.name,
-            message: error && error.message
-          });
+    logViewerDiagnostic("video-unlock-begin");
+    try {
+      for (const state of states) {
+        const sources = state.hasVideoSequence
+          ? [state.videoSources.intro, state.videoSources.loop]
+          : [state.videoSources.intro];
+        for (const source of sources.filter(Boolean)) {
+          try {
+            await unlockVideoSource(state.video, source);
+          } catch (error) {
+            logViewerDiagnostic("video-unlock-warning", {
+              src: source,
+              name: error && error.name,
+              message: error && error.message
+            });
+          }
         }
+        resetTargetVideoSequence(state);
       }
-      resetTargetVideoSequence(state);
+    } catch (error) {
+      logViewerDiagnostic("video-unlock-warning", {
+        name: error && error.name,
+        message: error && error.message
+      });
     }
+    logViewerDiagnostic("video-unlock-complete");
   }
 
   async function unlockVideoSource(video, source) {
@@ -433,6 +453,10 @@
     return () => {
       navigator.mediaDevices.getUserMedia = originalGetUserMedia;
     };
+  }
+
+  function logViewerDiagnostic(event, details = {}) {
+    console.info(`[ar-viewer] ${event}`, details);
   }
 
   function cloneConstraints(constraints) {
