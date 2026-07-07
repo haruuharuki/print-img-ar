@@ -1,7 +1,7 @@
 (function () {
   window.AR_LIBRARY = {
   "version": 1,
-  "maxActiveTargets": 10,
+  "maxActiveTargets": 15,
   "targetFile": "./assets/targets.mind",
   "targets": [
     {
@@ -24,7 +24,7 @@
         "muted": true,
         "playsInline": true
       },
-      "updatedAt": "2026-07-04T00:00:00Z"
+      "updatedAt": "2026-07-07T08:48:07Z"
     },
     {
       "id": "nuwa",
@@ -75,6 +75,30 @@
       "overlayMode": "auto-alpha",
       "overlayLoopPath": "./assets/overlays/lignice-loop.webm",
       "overlayLoopPackedPath": "./assets/overlays/lignice-loop-packed.mp4"
+    },
+    {
+      "id": "luk-jia2",
+      "name": "luk jia2",
+      "enabled": true,
+      "targetIndex": 3,
+      "imagePath": "./assets/targets/luk-jia2.png",
+      "overlayPath": "./assets/overlays/luk-jia2.webm",
+      "overlayType": "video",
+      "overlay": {
+        "width": 1.006,
+        "height": 1.455,
+        "position": "0 0 0.01",
+        "rotation": "0 0 0"
+      },
+      "video": {
+        "autoplay": true,
+        "loop": true,
+        "muted": true,
+        "playsInline": true
+      },
+      "updatedAt": "2026-07-07T08:47:20.463Z",
+      "overlayPackedPath": "./assets/overlays/luk-jia2-packed.mp4",
+      "overlayMode": "auto-alpha"
     }
   ]
 };
