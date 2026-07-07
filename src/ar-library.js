@@ -59,9 +59,9 @@
       "overlayPath": "./assets/overlays/lignice.webm",
       "overlayType": "video",
       "overlay": {
-        "width": 1.876,
-        "height": 1.944,
-        "position": "0 0 0.01",
+        "width": 1.519,
+        "height": 1.677,
+        "position": "0 0.066 0.01",
         "rotation": "0 0 0"
       },
       "video": {
@@ -70,7 +70,7 @@
         "muted": true,
         "playsInline": true
       },
-      "updatedAt": "2026-07-07T06:56:54Z",
+      "updatedAt": "2026-07-07T07:00:57Z",
       "overlayPackedPath": "./assets/overlays/lignice-packed.mp4",
       "overlayMode": "auto-alpha",
       "overlayLoopPath": "./assets/overlays/lignice-loop.webm",
