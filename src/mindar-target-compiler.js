@@ -19,9 +19,14 @@
   const statusText = document.querySelector("#compilerStatus");
   const progress = document.querySelector("#compilerProgress");
   const overlayInput = document.querySelector("#overlayMediaInput");
+  const introLoopToggle = document.querySelector("#introLoopToggle");
+  const overlayFileGrid = document.querySelector("#overlayFileGrid");
+  const overlayLoopFileCard = document.querySelector("#overlayLoopFileCard");
+  const overlayLoopInput = document.querySelector("#overlayLoopMediaInput");
   const overlayImagePreview = document.querySelector("#overlayImagePreview");
   const overlayVideoPreview = document.querySelector("#overlayVideoPreview");
   const overlayStatus = document.querySelector("#overlayMediaStatus");
+  const overlayLoopStatus = document.querySelector("#overlayLoopMediaStatus");
   const optimizerResolution = document.querySelector("#optimizerResolution");
   const optimizerFrameRate = document.querySelector("#optimizerFrameRate");
   const optimizerQuality = document.querySelector("#optimizerQuality");
@@ -34,8 +39,11 @@
 
   let selectedImageFile = null;
   let selectedOverlayFile = null;
+  let selectedLoopOverlayFile = null;
   let selectedPackedOverlayFile = null;
+  let selectedLoopPackedOverlayFile = null;
   let sourceOverlayFile = null;
+  let sourceLoopOverlayFile = null;
   let targetPreviewUrl = null;
   let overlayPreviewUrl = null;
   let compiledMindBlob = null;
@@ -75,6 +83,13 @@
   });
 
   nameInput.addEventListener("input", updateCompileButton);
+
+  if (introLoopToggle) {
+    introLoopToggle.addEventListener("change", () => {
+      setIntroLoopMode(introLoopToggle.checked, { clearLoopSelection: !introLoopToggle.checked });
+      updateCompileButton();
+    });
+  }
 
   if (overlayInput && overlayImagePreview && overlayVideoPreview && overlayStatus) {
     overlayVideoPreview.addEventListener("error", () => {
@@ -120,6 +135,33 @@
     });
   }
 
+  if (overlayLoopInput && overlayLoopStatus) {
+    overlayLoopInput.addEventListener("change", () => {
+      const file = overlayLoopInput.files && overlayLoopInput.files[0];
+
+      if (!file) {
+        updateCompileButton();
+        return;
+      }
+
+      const validation = validateOverlayFile(file);
+      if (!validation.ok) {
+        overlayLoopStatus.textContent = validation.message;
+        updateCompileButton();
+        return;
+      }
+
+      clearCompiledResult();
+      sourceLoopOverlayFile = file;
+      selectedLoopOverlayFile = file.size > MAX_OVERLAY_FILE_BYTES ? null : file;
+      selectedLoopPackedOverlayFile = null;
+      overlayLoopStatus.textContent = file.size > MAX_OVERLAY_FILE_BYTES
+        ? `This loop video is ${formatBytes(file.size)}. Convert it separately before saving.`
+        : `Loop video ready: ${file.name}`;
+      updateCompileButton();
+    });
+  }
+
   if (optimizeButton) {
     optimizeButton.addEventListener("click", optimizeOverlayForPreview);
   }
@@ -129,6 +171,12 @@
 
     const currentLibrary = window.AR_LIBRARY;
     const target = buildTargetEntry(currentLibrary);
+    const targetValidation = validateTargetBeforeSave(target);
+    if (!targetValidation.ok) {
+      setStatus(`Save blocked: ${targetValidation.message}`);
+      updateCompileButton();
+      return;
+    }
     const existingTarget = findLibraryTarget(target.id);
 
     if (existingTarget) {
@@ -184,10 +232,13 @@
         target,
         targetImage: selectedImageFile,
         overlayVideo: selectedOverlayFile,
+        overlayLoopVideo: selectedLoopOverlayFile,
         overlayPackedVideo: selectedPackedOverlayFile,
+        overlayLoopPackedVideo: selectedLoopPackedOverlayFile,
         targetsMind: compiledMindBlob
       });
 
+      validateSavedTarget(result.library, target);
       window.AR_LIBRARY = result.library;
       window.dispatchEvent(new CustomEvent("ar-library-updated"));
       downloadButton.disabled = false;
@@ -207,11 +258,62 @@
     downloadMindBlob(compiledMindBlob, compiledMindFileName);
   });
 
+  function validateTargetBeforeSave(target) {
+    if (isIntroLoopModeEnabled()) {
+      if (!selectedLoopOverlayFile) {
+        return {
+          ok: false,
+          message: "Intro + Loop is enabled, but the loop video is not ready. Convert Intro & Loop again."
+        };
+      }
+      if (!target.overlayLoopPath) {
+        return {
+          ok: false,
+          message: "Intro + Loop is enabled, but the target is missing overlayLoopPath."
+        };
+      }
+      if (Boolean(selectedPackedOverlayFile) !== Boolean(selectedLoopPackedOverlayFile)) {
+        return {
+          ok: false,
+          message: "Packed alpha must be available for both intro and loop, or neither one."
+        };
+      }
+    } else if (target.overlayLoopPath || selectedLoopOverlayFile || selectedLoopPackedOverlayFile) {
+      return {
+        ok: false,
+        message: "Loop media is still selected while Intro + Loop is off. Turn Intro + Loop on or choose the main video again."
+      };
+    }
+
+    return { ok: true };
+  }
+
+  function validateSavedTarget(library, expectedTarget) {
+    const savedTarget = library && Array.isArray(library.targets)
+      ? library.targets.find((item) => item.id === expectedTarget.id)
+      : null;
+
+    if (!savedTarget) {
+      throw new Error("Helper saved the library, but the target was missing from the response.");
+    }
+    if (expectedTarget.overlayLoopPath && savedTarget.overlayLoopPath !== expectedTarget.overlayLoopPath) {
+      throw new Error(
+        "Helper saved the target without the loop overlay path. Restart the Creator helper, then save again."
+      );
+    }
+    if (expectedTarget.overlayLoopPackedPath && savedTarget.overlayLoopPackedPath !== expectedTarget.overlayLoopPackedPath) {
+      throw new Error(
+        "Helper saved the target without the packed loop overlay path. Restart the Creator helper, then save again."
+      );
+    }
+  }
+
   function buildTargetEntry(library) {
     const name = nameInput.value.trim() || fileBaseName(selectedImageFile.name);
     const id = editingTargetId || slugify(name || selectedImageFile.name);
     const imageExt = fileExtension(selectedImageFile.name, ".png");
     const overlayExt = fileExtension(selectedOverlayFile.name, ".mp4");
+    const loopOverlayExt = selectedLoopOverlayFile ? fileExtension(selectedLoopOverlayFile.name, ".mp4") : "";
     const existing = (library.targets || []).find((item) => item.id === id);
     const baseOverlay = (existing && existing.overlay) || (library.targets && library.targets[0] && library.targets[0].overlay) || {
       width: 1,
@@ -227,10 +329,20 @@
       targetIndex: 0,
       imagePath: `./assets/targets/${id}${imageExt}`,
       overlayPath: `./assets/overlays/${id}${overlayExt}`,
-      ...(selectedPackedOverlayFile
+      ...(selectedLoopOverlayFile
+        ? {
+            overlayLoopPath: `./assets/overlays/${id}-loop${loopOverlayExt}`
+          }
+        : {}),
+      ...(selectedPackedOverlayFile && (!selectedLoopOverlayFile || selectedLoopPackedOverlayFile)
         ? {
             overlayPackedPath: `./assets/overlays/${id}-packed.mp4`,
             overlayMode: "auto-alpha"
+          }
+        : {}),
+      ...(selectedLoopPackedOverlayFile
+        ? {
+            overlayLoopPackedPath: `./assets/overlays/${id}-loop-packed.mp4`
           }
         : {}),
       overlayType: "video",
@@ -287,7 +399,9 @@
     target,
     targetImage,
     overlayVideo,
+    overlayLoopVideo,
     overlayPackedVideo,
+    overlayLoopPackedVideo,
     targetsMind
   }) {
     const form = new FormData();
@@ -295,11 +409,21 @@
     form.append("targetId", target.id);
     form.append("targetImage", targetImage, targetImage.name);
     form.append("overlayVideo", overlayVideo, overlayVideo.name);
+    if (overlayLoopVideo) {
+      form.append("overlayLoopVideo", overlayLoopVideo, overlayLoopVideo.name);
+    }
     if (overlayPackedVideo) {
       form.append(
         "overlayPackedVideo",
         overlayPackedVideo,
         overlayPackedVideo.name
+      );
+    }
+    if (overlayLoopPackedVideo) {
+      form.append(
+        "overlayLoopPackedVideo",
+        overlayLoopPackedVideo,
+        overlayLoopPackedVideo.name
       );
     }
     form.append("targetsMind", targetsMind, "targets.mind");
@@ -643,6 +767,11 @@
   }
 
   function updateCompileButton() {
+    if (!isIntroLoopModeEnabled()) {
+      selectedLoopOverlayFile = null;
+      selectedLoopPackedOverlayFile = null;
+      sourceLoopOverlayFile = null;
+    }
     const hasRequiredInput = Boolean(
       selectedImageFile &&
       selectedOverlayFile &&
@@ -685,10 +814,17 @@
     editingTargetId = target.id;
     selectedImageFile = null;
     selectedOverlayFile = null;
+    selectedLoopOverlayFile = null;
     selectedPackedOverlayFile = null;
+    selectedLoopPackedOverlayFile = null;
     sourceOverlayFile = null;
+    sourceLoopOverlayFile = null;
     imageInput.value = "";
     overlayInput.value = "";
+    if (overlayLoopInput) {
+      overlayLoopInput.value = "";
+    }
+    setIntroLoopMode(Boolean(target.overlayLoopPath), { clearLoopSelection: false });
     nameInput.value = target.name || target.id;
     clearCompiledResult();
     renderExistingTargetPreview(target);
@@ -698,6 +834,11 @@
     );
     overlayStatus.textContent =
       `Current overlay: ${fileNameFromPath(target.overlayPath)}. Choose a new MP4, MOV, or WebM only if you want to replace it.`;
+    if (overlayLoopStatus) {
+      overlayLoopStatus.textContent = target.overlayLoopPath
+        ? `Current loop video: ${fileNameFromPath(target.overlayLoopPath)}. Choose a new loop video only if you want to replace it.`
+        : "No loop video is configured for this target.";
+    }
     updateCompileButton();
   }
 
@@ -726,6 +867,33 @@
     overlayVideoPreview.src = target.overlayPath;
     overlayVideoPreview.classList.remove("hidden");
     overlayVideoPreview.load();
+  }
+
+  function setIntroLoopMode(enabled, { clearLoopSelection = false } = {}) {
+    if (introLoopToggle) {
+      introLoopToggle.checked = Boolean(enabled);
+    }
+    if (overlayFileGrid) {
+      overlayFileGrid.classList.toggle("has-loop", Boolean(enabled));
+    }
+    if (overlayLoopFileCard) {
+      overlayLoopFileCard.classList.toggle("hidden", !enabled);
+    }
+    if (!enabled && clearLoopSelection) {
+      selectedLoopOverlayFile = null;
+      selectedLoopPackedOverlayFile = null;
+      sourceLoopOverlayFile = null;
+      if (overlayLoopInput) {
+        overlayLoopInput.value = "";
+      }
+      if (overlayLoopStatus) {
+        overlayLoopStatus.textContent = "Optional: enable Intro + Loop to choose a loop video.";
+      }
+    }
+  }
+
+  function isIntroLoopModeEnabled() {
+    return Boolean(introLoopToggle && introLoopToggle.checked);
   }
 
   function downloadMindBlob(blob, fileName) {
@@ -855,7 +1023,10 @@
       if (control) control.disabled = !canConfigure;
     });
     optimizeButton.disabled = !canConfigure;
-    optimizeButton.textContent = optimizerAvailable ? "Convert & Preview" : "Convert & Preview";
+    optimizeButton.textContent =
+      isIntroLoopModeEnabled() && sourceLoopOverlayFile
+        ? "Convert Intro & Loop"
+        : "Convert & Preview";
   }
 
   function friendlyOptimizerError(error) {
@@ -868,37 +1039,67 @@
 
   async function optimizeOverlayForPreview() {
     if (!sourceOverlayFile || !optimizerAvailable) return;
+    const shouldConvertLoop = isIntroLoopModeEnabled() && Boolean(sourceLoopOverlayFile);
+
+    if (isIntroLoopModeEnabled() && !sourceLoopOverlayFile) {
+      optimizerStatus.textContent = "Choose a loop video, or turn off Intro + Loop before converting.";
+      return;
+    }
 
     optimizeButton.disabled = true;
     compileButton.disabled = true;
     progress.value = 0;
     progress.classList.remove("hidden");
-    optimizerStatus.textContent = "Converting overlay with FFmpeg...";
+    optimizerStatus.textContent = shouldConvertLoop
+      ? "Converting intro video with FFmpeg..."
+      : "Converting overlay with FFmpeg...";
     selectedPackedOverlayFile = null;
+    selectedLoopPackedOverlayFile = null;
 
     try {
-      const result = await requestOverlayOptimization();
-      selectedOverlayFile = result.file;
-      selectedPackedOverlayFile = result.packedFile;
+      const introResult = await requestOverlayOptimization(sourceOverlayFile);
+      let loopResult = null;
+
+      if (shouldConvertLoop) {
+        optimizerStatus.textContent = "Converting loop video with FFmpeg...";
+        loopResult = await requestOverlayOptimization(sourceLoopOverlayFile);
+      }
+
+      selectedOverlayFile = introResult.file;
+      selectedLoopOverlayFile = loopResult ? loopResult.file : selectedLoopOverlayFile;
+      selectedPackedOverlayFile = introResult.packedFile;
+      selectedLoopPackedOverlayFile = loopResult ? loopResult.packedFile : null;
+
+      if (loopResult && (!introResult.packedFile || !loopResult.packedFile)) {
+        selectedPackedOverlayFile = null;
+        selectedLoopPackedOverlayFile = null;
+      }
+
       revokeOverlayPreviewUrl();
-      overlayPreviewUrl = URL.createObjectURL(result.file);
+      overlayPreviewUrl = URL.createObjectURL(introResult.file);
       overlayVideoPreview.pause();
       overlayVideoPreview.src = overlayPreviewUrl;
       overlayVideoPreview.classList.remove("hidden");
       overlayVideoPreview.load();
-      overlayStatus.textContent = `Optimized overlay ready: ${result.file.name}`;
+      overlayStatus.textContent = shouldConvertLoop
+        ? `Optimized intro ready: ${introResult.file.name}`
+        : `Optimized overlay ready: ${introResult.file.name}`;
+      if (loopResult && overlayLoopStatus) {
+        overlayLoopStatus.textContent = `Optimized loop ready: ${loopResult.file.name}`;
+      }
 
-      const packedMessage = result.packedFile
-        ? ` Packed iPhone fallback ready: ${result.packedFile.name} (${formatBytes(result.packedFile.size)}).`
-        : result.packedSkippedReason
-          ? ` Packed fallback skipped: ${result.packedSkippedReason}`
-          : "";
+      const conversionMessage = loopResult
+        ? `Converted intro ${formatBytes(introResult.originalSize)} to ${formatBytes(introResult.optimizedSize)}; ` +
+          `loop ${formatBytes(loopResult.originalSize)} to ${formatBytes(loopResult.optimizedSize)}.`
+        : `Converted ${formatBytes(introResult.originalSize)} to ${formatBytes(introResult.optimizedSize)}.`;
+      const packedMessage = packedOptimizationMessage(introResult, loopResult);
 
       optimizerStatus.textContent =
-        `Converted ${formatBytes(result.originalSize)} to ${formatBytes(result.optimizedSize)}. ` +
+        `${conversionMessage} ` +
         `Save Target will use the optimized WebM.${packedMessage}`;
     } catch (error) {
       selectedPackedOverlayFile = null;
+      selectedLoopPackedOverlayFile = null;
       console.error(error);
       optimizerStatus.textContent = `Convert failed: ${friendlyOptimizerError(error)}`;
     } finally {
@@ -908,9 +1109,32 @@
     }
   }
 
-  async function requestOverlayOptimization() {
+  function packedOptimizationMessage(introResult, loopResult) {
+    if (loopResult) {
+      if (introResult.packedFile && loopResult.packedFile) {
+        return ` Packed iPhone fallbacks ready: ${introResult.packedFile.name} and ${loopResult.packedFile.name}.`;
+      }
+
+      const skippedReasons = [introResult.packedSkippedReason, loopResult.packedSkippedReason]
+        .filter(Boolean)
+        .join("; ");
+      return skippedReasons
+        ? ` Packed fallback skipped for this Intro + Loop pair: ${skippedReasons}`
+        : " Packed fallback skipped for this Intro + Loop pair because both segments need matching packed files.";
+    }
+
+    if (introResult.packedFile) {
+      return ` Packed iPhone fallback ready: ${introResult.packedFile.name} (${formatBytes(introResult.packedFile.size)}).`;
+    }
+
+    return introResult.packedSkippedReason
+      ? ` Packed fallback skipped: ${introResult.packedSkippedReason}`
+      : "";
+  }
+
+  async function requestOverlayOptimization(sourceFile) {
     const form = new FormData();
-    form.append("overlayVideo", sourceOverlayFile, sourceOverlayFile.name);
+    form.append("overlayVideo", sourceFile, sourceFile.name);
     form.append("resolution", optimizerResolution.value);
     form.append("frameRate", optimizerFrameRate.value);
     form.append("quality", optimizerQuality.value);
@@ -932,7 +1156,7 @@
     }
 
     const blob = await response.blob();
-    const fileName = response.headers.get("X-Output-File-Name") || optimizedFileName(sourceOverlayFile.name);
+    const fileName = response.headers.get("X-Output-File-Name") || optimizedFileName(sourceFile.name);
     if (blob.size > MAX_OVERLAY_FILE_BYTES) {
       throw new Error(`Optimized file is still ${formatBytes(blob.size)}. Try Small quality or 720 px.`);
     }
@@ -941,7 +1165,7 @@
     const packedDownloadPath = response.headers.get("X-Packed-Download-Path");
     const packedFileName =
       response.headers.get("X-Packed-File-Name") ||
-      `${fileBaseName(sourceOverlayFile.name)}-packed.mp4`;
+      `${fileBaseName(sourceFile.name)}-packed.mp4`;
     const packedSkippedReason = response.headers.get("X-Packed-Skipped-Reason") || "";
     const packedError = response.headers.get("X-Packed-Error") || "";
     let packedFile = null;
@@ -987,7 +1211,7 @@
       file: new File([blob], fileName, { type: "video/webm" }),
       packedFile,
       packedSkippedReason,
-      originalSize: Number(response.headers.get("X-Original-Size")) || sourceOverlayFile.size,
+      originalSize: Number(response.headers.get("X-Original-Size")) || sourceFile.size,
       optimizedSize: Number(response.headers.get("X-Optimized-Size")) || blob.size
     };
   }

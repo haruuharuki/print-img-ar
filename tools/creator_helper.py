@@ -850,17 +850,34 @@ def save_library_target(form):
 
     target_image = required_form_file(form, "targetImage")
     overlay_video = required_form_file(form, "overlayVideo")
+    overlay_loop_video = optional_form_file(form, "overlayLoopVideo")
     overlay_packed_video = optional_form_file(form, "overlayPackedVideo")
+    overlay_loop_packed_video = optional_form_file(form, "overlayLoopPackedVideo")
     targets_mind = required_form_file(form, "targetsMind")
 
     target_ext = image_extension(target_image.filename)
     overlay_ext = overlay_extension(overlay_video.filename)
+    overlay_loop_ext = overlay_extension(overlay_loop_video.filename) if overlay_loop_video is not None else None
     packed_path = target.get("overlayPackedPath")
+    loop_path = target.get("overlayLoopPath")
+    loop_packed_path = target.get("overlayLoopPackedPath")
 
     if target.get("imagePath") != f"./assets/targets/{target_id}{target_ext}":
         raise DeployError("library imagePath does not match targetId.", details={"imagePath": target.get("imagePath")})
     if target.get("overlayPath") != f"./assets/overlays/{target_id}{overlay_ext}":
         raise DeployError("library overlayPath does not match targetId.", details={"overlayPath": target.get("overlayPath")})
+    if overlay_loop_video is not None:
+        expected_loop_path = f"./assets/overlays/{target_id}-loop{overlay_loop_ext}"
+        if loop_path != expected_loop_path:
+            raise DeployError(
+                "library overlayLoopPath does not match targetId.",
+                details={"overlayLoopPath": loop_path, "expected": expected_loop_path},
+            )
+    elif loop_path:
+        raise DeployError(
+            "Library target expects a loop overlay, but overlayLoopVideo was not uploaded.",
+            details={"overlayLoopPath": loop_path},
+        )
 
     if overlay_packed_video is not None:
         packed_ext = overlay_extension(overlay_packed_video.filename)
@@ -883,6 +900,27 @@ def save_library_target(form):
             "Library target expects a packed overlay, but overlayPackedVideo was not uploaded.",
             details={"overlayPackedPath": packed_path},
         )
+    if overlay_loop_packed_video is not None:
+        loop_packed_ext = overlay_extension(overlay_loop_packed_video.filename)
+        if loop_packed_ext != ".mp4":
+            raise DeployError(
+                "Packed alpha loop overlay must be an MP4.",
+                details={"filename": overlay_loop_packed_video.filename},
+            )
+        expected_loop_packed_path = f"./assets/overlays/{target_id}-loop-packed.mp4"
+        if loop_packed_path != expected_loop_packed_path:
+            raise DeployError(
+                "library overlayLoopPackedPath does not match targetId.",
+                details={
+                    "overlayLoopPackedPath": loop_packed_path,
+                    "expected": expected_loop_packed_path,
+                },
+            )
+    elif loop_packed_path:
+        raise DeployError(
+            "Library target expects a packed loop overlay, but overlayLoopPackedVideo was not uploaded.",
+            details={"overlayLoopPackedPath": loop_packed_path},
+        )
 
     normalized_library = normalize_library(library)
 
@@ -890,10 +928,17 @@ def save_library_target(form):
     OVERLAYS_DIR.mkdir(parents=True, exist_ok=True)
     write_uploaded_file(target_image, TARGETS_DIR / f"{target_id}{target_ext}")
     write_uploaded_file(overlay_video, OVERLAYS_DIR / f"{target_id}{overlay_ext}")
+    if overlay_loop_video is not None:
+        write_uploaded_file(overlay_loop_video, OVERLAYS_DIR / f"{target_id}-loop{overlay_loop_ext}")
     if overlay_packed_video is not None:
         write_uploaded_file(
             overlay_packed_video,
             OVERLAYS_DIR / f"{target_id}-packed.mp4",
+        )
+    if overlay_loop_packed_video is not None:
+        write_uploaded_file(
+            overlay_loop_packed_video,
+            OVERLAYS_DIR / f"{target_id}-loop-packed.mp4",
         )
     write_uploaded_file(targets_mind, TARGETS_MIND_PATH)
     write_library_js(normalized_library)
@@ -902,8 +947,12 @@ def save_library_target(form):
         f"assets/targets/{target_id}{target_ext}",
         f"assets/overlays/{target_id}{overlay_ext}",
     ]
+    if overlay_loop_video is not None:
+        written_files.append(f"assets/overlays/{target_id}-loop{overlay_loop_ext}")
     if overlay_packed_video is not None:
         written_files.append(f"assets/overlays/{target_id}-packed.mp4")
+    if overlay_loop_packed_video is not None:
+        written_files.append(f"assets/overlays/{target_id}-loop-packed.mp4")
     written_files.extend([
         "assets/targets.mind",
         "src/ar-library.js",
@@ -1126,12 +1175,9 @@ def prepare_library_deploy(payload):
 
     for target in normalized_library["targets"]:
         image_repo_path = target["imagePath"][2:]
-        overlay_repo_path = target["overlayPath"][2:]
         image_path = ROOT / image_repo_path
-        overlay_path = ROOT / overlay_repo_path
         referenced_targets.add(normalize_repo_path(image_repo_path))
-        referenced_overlays.add(normalize_repo_path(overlay_repo_path))
-        files_to_deploy.extend([normalize_repo_path(image_repo_path), normalize_repo_path(overlay_repo_path)])
+        files_to_deploy.append(normalize_repo_path(image_repo_path))
 
         if not image_path.exists():
             errors.append(f"{target['id']} image file is missing: {target['imagePath']}")
@@ -1139,8 +1185,15 @@ def prepare_library_deploy(payload):
             image_mtime = image_path.stat().st_mtime
             latest_enabled_image_mtime = image_mtime if latest_enabled_image_mtime is None else max(latest_enabled_image_mtime, image_mtime)
 
-        if not overlay_path.exists():
-            errors.append(f"{target['id']} overlay file is missing: {target['overlayPath']}")
+        for key in ("overlayPath", "overlayLoopPath", "overlayPackedPath", "overlayLoopPackedPath"):
+            if not target.get(key):
+                continue
+            overlay_repo_path = target[key][2:]
+            overlay_path = ROOT / overlay_repo_path
+            referenced_overlays.add(normalize_repo_path(overlay_repo_path))
+            files_to_deploy.append(normalize_repo_path(overlay_repo_path))
+            if not overlay_path.exists():
+                errors.append(f"{target['id']} {key} file is missing: {target[key]}")
 
     if actual_indexes != expected_indexes:
         errors.append(f"Enabled targetIndex values must be {expected_indexes}, got {actual_indexes}.")
@@ -1503,9 +1556,13 @@ def normalize_target(target):
 
     image_path = validate_asset_path(target.get("imagePath"), "assets/targets/", {".png", ".jpg", ".jpeg", ".webp"})
     overlay_path = validate_asset_path(target.get("overlayPath"), "assets/overlays/", OVERLAY_EXTENSIONS)
+    overlay_loop_path = None
+    if target.get("overlayLoopPath"):
+        overlay_loop_path = validate_asset_path(target.get("overlayLoopPath"), "assets/overlays/", OVERLAY_EXTENSIONS)
     overlay = validate_overlay(target.get("overlay"), f"target {target_id} overlay")
 
     overlay_packed_path = None
+    overlay_loop_packed_path = None
     overlay_mode = str(target.get("overlayMode") or "video").strip()
 
     if target.get("overlayPackedPath"):
@@ -1524,6 +1581,22 @@ def normalize_target(target):
             )
     else:
         overlay_mode = "video"
+    if target.get("overlayLoopPackedPath"):
+        overlay_loop_packed_path = validate_asset_path(
+            target.get("overlayLoopPackedPath"),
+            "assets/overlays/",
+            {".mp4"},
+        )
+        if not overlay_packed_path:
+            raise DeployError(
+                "overlayLoopPackedPath requires overlayPackedPath.",
+                details={"overlayLoopPackedPath": overlay_loop_packed_path},
+            )
+        if not overlay_loop_path:
+            raise DeployError(
+                "overlayLoopPackedPath requires overlayLoopPath.",
+                details={"overlayLoopPackedPath": overlay_loop_packed_path},
+            )
 
     normalized = {
         "id": target_id,
@@ -1541,6 +1614,10 @@ def normalize_target(target):
     if overlay_packed_path:
         normalized["overlayPackedPath"] = overlay_packed_path
         normalized["overlayMode"] = overlay_mode
+    if overlay_loop_path:
+        normalized["overlayLoopPath"] = overlay_loop_path
+    if overlay_loop_packed_path:
+        normalized["overlayLoopPackedPath"] = overlay_loop_packed_path
 
     return normalized
 

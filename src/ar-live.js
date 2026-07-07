@@ -218,7 +218,7 @@
         nextSticker.append(nextCanvas);
       } else {
         nextVideo = document.createElement("video");
-        configureStickerVideo(nextVideo, targetState.video);
+        configureStickerVideo(nextVideo, targetState.video, targetState);
         nextVideo.setAttribute("playsinline", "");
         nextVideo.setAttribute("webkit-playsinline", "");
         nextVideo.addEventListener("error", () => {
@@ -312,7 +312,7 @@
 
       const video = document.createElement("video");
       video.style.display = "none";
-      configureStickerVideo(video, targetState.video);
+      configureStickerVideo(video, targetState.video, targetState);
       video.setAttribute("playsinline", "");
       video.setAttribute("webkit-playsinline", "");
       video.addEventListener("error", () => {
@@ -850,7 +850,7 @@
       });
     }
 
-    function configureStickerVideo(video, sourceVideo) {
+    function configureStickerVideo(video, sourceVideo, targetState) {
       const source = sourceVideo.currentSrc || sourceVideo.src;
       video.crossOrigin = sourceVideo.crossOrigin || "anonymous";
       video.loop = sourceVideo.loop;
@@ -863,6 +863,22 @@
       video.toggleAttribute("playsinline", sourceVideo.playsInline);
       video.toggleAttribute("webkit-playsinline", sourceVideo.hasAttribute("webkit-playsinline"));
       video.src = source;
+      if (targetState && targetState.hasVideoSequence) {
+        video.dataset.liveVideoPhase = targetState.videoPhase || "intro";
+        video.addEventListener("ended", () => {
+          if (video.dataset.liveVideoPhase !== "intro") return;
+          const nextSource = targetState.videoSources && targetState.videoSources.loop;
+          if (!nextSource) return;
+          video.dataset.liveVideoPhase = "loop";
+          video.loop = true;
+          video.toggleAttribute("loop", true);
+          video.src = nextSource;
+          video.load();
+          video.play().catch((error) => {
+            console.warn("Live loop video play was blocked", error);
+          });
+        });
+      }
     }
 
     async function syncArTimeToSticker(sourceVideo, video, pauseSource = true) {

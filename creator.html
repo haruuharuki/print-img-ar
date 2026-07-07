@@ -242,6 +242,47 @@
         align-items: stretch;
       }
 
+      .overlay-file-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .intro-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 32px;
+        color: #f2f2f2;
+        font-size: 12px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .intro-toggle input {
+        width: 18px;
+        height: 18px;
+        margin: 0;
+        accent-color: #39d98a;
+      }
+
+      .overlay-file-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 10px;
+      }
+
+      .overlay-file-grid.has-loop {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .overlay-file-card {
+        display: grid;
+        gap: 7px;
+        min-width: 0;
+      }
+
       .compiler-preview {
         display: grid;
         place-items: center;
@@ -604,6 +645,7 @@
         }
 
         .compiler-grid,
+        .overlay-file-grid.has-loop,
         .optimizer-grid,
         .compiler-actions {
           grid-template-columns: 1fr;
@@ -723,9 +765,25 @@
             </div>
             <div class="compiler-grid">
               <div class="control-group">
-                <label class="control-label" for="overlayMediaInput">Overlay video</label>
-                <input id="overlayMediaInput" type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm" />
-                <p id="overlayMediaStatus" class="compiler-status">Choose an MP4, MOV, or WebM overlay for this target.</p>
+                <div class="overlay-file-header">
+                  <label class="control-label" for="overlayMediaInput">Overlay video</label>
+                  <label class="intro-toggle" for="introLoopToggle">
+                    <input id="introLoopToggle" type="checkbox" />
+                    <span>Intro + Loop</span>
+                  </label>
+                </div>
+                <div id="overlayFileGrid" class="overlay-file-grid">
+                  <div class="overlay-file-card">
+                    <label class="control-label" for="overlayMediaInput">Main / Intro video</label>
+                    <input id="overlayMediaInput" type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm" />
+                    <p id="overlayMediaStatus" class="compiler-status">Choose an MP4, MOV, or WebM overlay for this target.</p>
+                  </div>
+                  <div id="overlayLoopFileCard" class="overlay-file-card hidden">
+                    <label class="control-label" for="overlayLoopMediaInput">Loop video</label>
+                    <input id="overlayLoopMediaInput" type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm" />
+                    <p id="overlayLoopMediaStatus" class="compiler-status">Choose the video that loops after the intro finishes.</p>
+                  </div>
+                </div>
                 <section class="optimizer-panel" aria-label="Optimize overlay for AR">
                   <h3 class="compiler-title">Optimize for AR</h3>
                   <div class="optimizer-grid">

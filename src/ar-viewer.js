@@ -62,7 +62,7 @@
       statusBox.textContent = config.ui.scanningText;
     } catch (error) {
       console.error(error);
-      statusBox.textContent = config.ui.errorText;
+      statusBox.textContent = `${config.ui.errorText}: ${error.name || "Error"} ${error.message || error}`;
     }
   });
 
@@ -117,6 +117,7 @@
       capture && capture.setTargetVisible(true);
       if (targetState.videoConfig.autoplay && (!live || live.shouldPlayTargetVideo(targetState))) {
         try {
+          resetTargetVideoSequence(targetState);
           await targetState.video.play();
         } catch (error) {
           console.warn("Video play was blocked", error);
@@ -127,6 +128,7 @@
     targetState.entity.addEventListener("targetLost", () => {
       visibleTargetIds.delete(targetState.target.id);
       targetState.video.pause();
+      resetTargetVideoSequence(targetState);
       live && live.setTargetVisibility(targetState, false);
       statusBox.textContent = config.ui.lostText;
 
@@ -241,9 +243,9 @@
     const usesPackedAlpha =
       Boolean(target.overlayPackedPath) &&
       ["auto-alpha", "packed-alpha"].includes(target.overlayMode);
-    const activeOverlayPath = usesPackedAlpha
-      ? target.overlayPackedPath
-      : target.overlayPath;
+    const videoSources = getTargetVideoSources(target, usesPackedAlpha);
+    const hasVideoSequence = Boolean(videoSources.loop);
+    const activeOverlayPath = videoSources.intro;
     const videoConfig = {
       autoplay: target.video && target.video.autoplay !== undefined ? target.video.autoplay : true,
       loop: target.video && target.video.loop !== undefined ? target.video.loop : true,
@@ -254,16 +256,16 @@
     video.id = videoId;
     video.preload = "auto";
     video.src = activeOverlayPath;
-    video.loop = videoConfig.loop;
+    video.loop = hasVideoSequence ? false : videoConfig.loop;
     video.muted = videoConfig.muted;
     video.playsInline = videoConfig.playsInline;
     video.crossOrigin = "anonymous";
-    video.toggleAttribute("loop", videoConfig.loop);
+    video.toggleAttribute("loop", video.loop);
     video.toggleAttribute("muted", videoConfig.muted);
     video.toggleAttribute("playsinline", videoConfig.playsInline);
     video.toggleAttribute("webkit-playsinline", videoConfig.playsInline);
     video.addEventListener("error", () => {
-      statusBox.textContent = `This browser could not play ${fileNameFromPath(activeOverlayPath)}. Try a browser that supports this overlay format.`;
+      statusBox.textContent = `This browser could not play ${fileNameFromPath(video.currentSrc || video.src || activeOverlayPath)}. Try a browser that supports this overlay format.`;
     });
     assetsRoot.append(video);
 
@@ -286,14 +288,19 @@
 
     entity.append(overlay);
 
-    return {
+    const targetState = {
       target,
       video,
       videoConfig,
+      videoSources,
+      hasVideoSequence,
+      videoPhase: hasVideoSequence ? "intro" : "single",
       entity,
       overlay,
       usesPackedAlpha
     };
+    video.addEventListener("ended", () => handleTargetVideoEnded(targetState));
+    return targetState;
   }
 
   function setActiveTarget(targetState) {
@@ -308,10 +315,90 @@
   }
 
   async function unlockVideos(states) {
-    for (const { video } of states) {
-      await video.play();
+    for (const state of states) {
+      const sources = state.hasVideoSequence
+        ? [state.videoSources.intro, state.videoSources.loop]
+        : [state.videoSources.intro];
+      for (const source of sources.filter(Boolean)) {
+        try {
+          await unlockVideoSource(state.video, source);
+        } catch (error) {
+          console.warn("Video unlock failed", {
+            src: source,
+            name: error && error.name,
+            message: error && error.message
+          });
+        }
+      }
+      resetTargetVideoSequence(state);
+    }
+  }
+
+  async function unlockVideoSource(video, source) {
+    if (!source) return;
+    if (!isSameVideoSource(video, source)) {
+      video.src = source;
+      video.load();
+    }
+    await video.play();
+    video.pause();
+    video.currentTime = 0;
+  }
+
+  function getTargetVideoSources(target, usesPackedAlpha) {
+    return {
+      intro: usesPackedAlpha ? target.overlayPackedPath : target.overlayPath,
+      loop: usesPackedAlpha
+        ? target.overlayLoopPackedPath || null
+        : target.overlayLoopPath || null
+    };
+  }
+
+  function resetTargetVideoSequence(targetState) {
+    if (!targetState || !targetState.video) return;
+    if (!targetState.hasVideoSequence) {
+      targetState.videoPhase = "single";
+      return;
+    }
+    setTargetVideoPhase(targetState, "intro", 0);
+  }
+
+  function handleTargetVideoEnded(targetState) {
+    if (!targetState || !targetState.hasVideoSequence || targetState.videoPhase !== "intro") return;
+    setTargetVideoPhase(targetState, "loop", 0);
+    targetState.video.play().catch((error) => {
+      console.warn("Loop video play was blocked", error);
+    });
+  }
+
+  function setTargetVideoPhase(targetState, phase, currentTime) {
+    const source = phase === "loop" ? targetState.videoSources.loop : targetState.videoSources.intro;
+    if (!source) return;
+    const video = targetState.video;
+    if (!isSameVideoSource(video, source)) {
       video.pause();
-      video.currentTime = 0;
+      video.src = source;
+      video.load();
+    }
+    targetState.videoPhase = phase;
+    video.loop = phase === "loop" ? true : targetState.hasVideoSequence ? false : targetState.videoConfig.loop;
+    video.toggleAttribute("loop", video.loop);
+    if (Number.isFinite(currentTime)) {
+      try {
+        video.currentTime = currentTime;
+      } catch (error) {
+        console.warn("Could not set AR video time", error);
+      }
+    }
+  }
+
+  function isSameVideoSource(video, source) {
+    const currentSource = video.currentSrc || video.src || "";
+    if (!currentSource || !source) return false;
+    try {
+      return new URL(currentSource, window.location.href).href === new URL(source, window.location.href).href;
+    } catch (_error) {
+      return currentSource === source;
     }
   }
 

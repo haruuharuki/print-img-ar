@@ -79,9 +79,17 @@
 
   startButton.addEventListener("click", async () => {
     try {
-      await video.play();
-      video.pause();
-      video.currentTime = 0;
+      try {
+        await video.play();
+        video.pause();
+        video.currentTime = 0;
+      } catch (error) {
+        console.warn("Creator video unlock failed", {
+          src: video.currentSrc || video.src,
+          name: error && error.name,
+          message: error && error.message
+        });
+      }
 
       const mindarSystem = scene.systems["mindar-image-system"];
       await mindarSystem.start();
@@ -91,7 +99,7 @@
       statusBox.textContent = config.ui.scanningText;
     } catch (error) {
       console.error(error);
-      statusBox.textContent = config.ui.errorText;
+      statusBox.textContent = `${config.ui.errorText}: ${error.name || "Error"} ${error.message || error}`;
     }
   });
 
@@ -113,6 +121,7 @@
   video.addEventListener("error", () => {
     statusBox.textContent = `This browser could not play ${fileNameFromPath(activeTarget.overlayPath)}. Try a browser that supports this overlay format.`;
   });
+  video.addEventListener("ended", handlePreviewVideoEnded);
   libraryButton.addEventListener("click", openLibraryPanel);
   libraryTrashButton.addEventListener("click", () => {
     if (libraryMode === "trash") {
@@ -286,6 +295,9 @@
     appendMeta(meta, "targetIndex", targetConfig.targetIndex ?? "none");
     appendMeta(meta, "target image", fileNameFromPath(targetConfig.imagePath));
     appendMeta(meta, "overlay video", fileNameFromPath(targetConfig.overlayPath));
+    if (targetConfig.overlayLoopPath) {
+      appendMeta(meta, "loop video", fileNameFromPath(targetConfig.overlayLoopPath));
+    }
     appendMeta(meta, "updatedAt", targetConfig.updatedAt || "none");
 
     const actions = document.createElement("div");
@@ -575,6 +587,9 @@
     const videoConfig = activeTarget.video || {};
     if (!hasStarted || videoConfig.autoplay === false) return;
     try {
+      if (activeTarget.overlayLoopPath) {
+        resetPreviewVideoSequence();
+      }
       await video.play();
     } catch (error) {
       console.warn("Video play was blocked", error);
@@ -584,6 +599,9 @@
   function handleTargetLost() {
     statusBox.textContent = config.ui.lostText;
     video.pause();
+    if (activeTarget.overlayLoopPath) {
+      resetPreviewVideoSequence();
+    }
   }
 
   function populateTargetSelect() {
@@ -662,7 +680,7 @@
     const videoConfig = targetConfig.video || {};
     video.pause();
     video.src = targetConfig.overlayPath;
-    video.loop = videoConfig.loop !== undefined ? videoConfig.loop : true;
+    video.loop = targetConfig.overlayLoopPath ? false : videoConfig.loop !== undefined ? videoConfig.loop : true;
     video.muted = videoConfig.muted !== undefined ? videoConfig.muted : true;
     video.playsInline = videoConfig.playsInline !== undefined ? videoConfig.playsInline : true;
     video.toggleAttribute("loop", video.loop);
@@ -670,6 +688,45 @@
     video.toggleAttribute("playsinline", video.playsInline);
     video.toggleAttribute("webkit-playsinline", video.playsInline);
     video.load();
+  }
+
+  function handlePreviewVideoEnded() {
+    if (!activeTarget || !activeTarget.overlayLoopPath) return;
+    video.pause();
+    video.src = activeTarget.overlayLoopPath;
+    video.loop = true;
+    video.toggleAttribute("loop", true);
+    video.load();
+    video.play().catch((error) => {
+      console.warn("Creator loop video play was blocked", error);
+    });
+  }
+
+  function resetPreviewVideoSequence() {
+    if (!activeTarget || !activeTarget.overlayPath || !activeTarget.overlayLoopPath) return;
+    const videoConfig = activeTarget.video || {};
+    const desiredLoop = activeTarget.overlayLoopPath ? false : videoConfig.loop !== undefined ? videoConfig.loop : true;
+    if (!isSameVideoSource(video, activeTarget.overlayPath)) {
+      video.src = activeTarget.overlayPath;
+      video.load();
+    }
+    video.loop = desiredLoop;
+    video.toggleAttribute("loop", desiredLoop);
+    try {
+      video.currentTime = 0;
+    } catch (error) {
+      console.warn("Could not reset Creator video time", error);
+    }
+  }
+
+  function isSameVideoSource(videoElement, source) {
+    const currentSource = videoElement.currentSrc || videoElement.src || "";
+    if (!currentSource || !source) return false;
+    try {
+      return new URL(currentSource, window.location.href).href === new URL(source, window.location.href).href;
+    } catch (_error) {
+      return currentSource === source;
+    }
   }
 
   function loadOverlayState(targetConfig) {

@@ -49,6 +49,32 @@
       "updatedAt": "2026-07-06T08:58:27.832Z",
       "overlayPackedPath": "./assets/overlays/nuwa-packed.mp4",
       "overlayMode": "auto-alpha"
+    },
+    {
+      "id": "lignice",
+      "name": "Lignice",
+      "enabled": true,
+      "targetIndex": 2,
+      "imagePath": "./assets/targets/lignice.png",
+      "overlayPath": "./assets/overlays/lignice.webm",
+      "overlayType": "video",
+      "overlay": {
+        "width": 1.006,
+        "height": 1.455,
+        "position": "0 0 0.01",
+        "rotation": "0 0 0"
+      },
+      "video": {
+        "autoplay": true,
+        "loop": true,
+        "muted": true,
+        "playsInline": true
+      },
+      "updatedAt": "2026-07-07T05:08:00Z",
+      "overlayPackedPath": "./assets/overlays/lignice-packed.mp4",
+      "overlayMode": "auto-alpha",
+      "overlayLoopPath": "./assets/overlays/lignice-loop.webm",
+      "overlayLoopPackedPath": "./assets/overlays/lignice-loop-packed.mp4"
     }
   ]
 };
