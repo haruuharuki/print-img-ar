@@ -128,8 +128,16 @@
       capture && capture.setTargetVisible(true);
       if (targetState.videoConfig.autoplay && (!live || live.shouldPlayTargetVideo(targetState))) {
         try {
+          logViewerDiagnostic("target-found-play-begin", {
+            targetId: targetState.target.id,
+            phase: targetState.videoPhase
+          });
           resetTargetVideoSequence(targetState);
           await targetState.video.play();
+          logViewerDiagnostic("target-found-play-success", {
+            targetId: targetState.target.id,
+            phase: targetState.videoPhase
+          });
         } catch (error) {
           console.warn("Video play was blocked", error);
         }
@@ -334,9 +342,9 @@
           : [state.videoSources.intro];
         for (const source of sources.filter(Boolean)) {
           try {
-            await unlockVideoSource(state.video, source);
+            await unlockVideoSource(source);
           } catch (error) {
-            logViewerDiagnostic("video-unlock-warning", {
+            logViewerDiagnostic("detached-unlock-warning", {
               src: source,
               name: error && error.name,
               message: error && error.message
@@ -354,15 +362,34 @@
     logViewerDiagnostic("video-unlock-complete");
   }
 
-  async function unlockVideoSource(video, source) {
+  async function unlockVideoSource(source) {
     if (!source) return;
-    if (!isSameVideoSource(video, source)) {
-      video.src = source;
+    logViewerDiagnostic("detached-unlock-begin", { src: source });
+    const video = document.createElement("video");
+    video.muted = true;
+    video.defaultMuted = true;
+    video.playsInline = true;
+    video.preload = "auto";
+    video.setAttribute("muted", "");
+    video.setAttribute("playsinline", "");
+    video.setAttribute("webkit-playsinline", "");
+    video.src = source;
+
+    try {
       video.load();
+      await video.play();
+      video.pause();
+    } finally {
+      video.pause();
+      video.removeAttribute("src");
+      try {
+        video.load();
+      } catch (_error) {
+        // Some WebKit builds throw when loading after src cleanup.
+      }
+      video.remove();
+      logViewerDiagnostic("detached-unlock-complete", { src: source });
     }
-    await video.play();
-    video.pause();
-    video.currentTime = 0;
   }
 
   function getTargetVideoSources(target, usesPackedAlpha) {
@@ -497,7 +524,7 @@
     if (!library || !Array.isArray(library.targets)) return [];
     return library.targets
       .filter((target) => target.enabled)
-      .slice(0, library.maxActiveTargets || 10)
+      .slice(0, library.maxActiveTargets || 15)
       .sort((a, b) => Number(a.targetIndex) - Number(b.targetIndex));
   }
 
