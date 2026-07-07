@@ -256,6 +256,23 @@
         touch-action: none;
         pointer-events: auto;
         user-select: none;
+        filter: drop-shadow(0 5px 10px rgba(0, 0, 0, 0.22));
+        will-change: transform, filter;
+      }
+
+      .live-sticker.is-lifting,
+      .live-sticker.is-settling {
+        transition:
+          transform 180ms cubic-bezier(0.2, 0.9, 0.24, 1.08),
+          filter 180ms ease-out;
+      }
+
+      .live-sticker.is-dragging {
+        filter: drop-shadow(0 14px 24px rgba(0, 0, 0, 0.42));
+      }
+
+      .live-sticker.is-settling {
+        filter: drop-shadow(0 6px 12px rgba(0, 0, 0, 0.26));
       }
 
       .live-sticker video {
@@ -263,6 +280,13 @@
         width: 100%;
         height: auto;
         pointer-events: none;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .live-sticker.is-lifting,
+        .live-sticker.is-settling {
+          transition: none;
+        }
       }
 
       .live-selection {

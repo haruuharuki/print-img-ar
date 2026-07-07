@@ -27,11 +27,13 @@
     let translateX = 0;
     let translateY = 0;
     let scale = 1;
+    let interactionScale = 1;
     let rotationDegrees = 0;
     let isFlipped = false;
     let dragStart = null;
     let resizeStart = null;
     let rotateStart = null;
+    let hadMultiPointerGesture = false;
     let selectionBox = null;
     let resizeHandle = null;
     let rotateHandle = null;
@@ -39,6 +41,7 @@
     let flipHandle = null;
     let isSelectionVisible = false;
     let duplicateSequence = 0;
+    let interactionMotionTimer = null;
     const visibleTargetStates = new Map();
     const liveStickers = new Map();
     const packedSources = new Map();
@@ -130,6 +133,7 @@
     function exitLiveMode() {
       if (mode === "attached") return;
       syncSelectedStickerTimeToAr();
+      endStickerInteraction(false);
       hideSelectionBox();
       removeViewportListeners();
       mode = "attached";
@@ -244,6 +248,7 @@
         translateX: initialTransform ? initialTransform.translateX : 0,
         translateY: initialTransform ? initialTransform.translateY : 0,
         scale: initialTransform ? initialTransform.scale : 1,
+        interactionScale: 1,
         rotationDegrees: initialTransform ? initialTransform.rotationDegrees : 0,
         isFlipped: initialTransform ? !!initialTransform.isFlipped : false
       };
@@ -280,6 +285,8 @@
       dragStart = null;
       resizeStart = null;
       rotateStart = null;
+      hadMultiPointerGesture = false;
+      endStickerInteraction(false);
       if (selectedSticker.sharedPackedSource) {
         selectedSticker.sharedPackedSource.removeSubscriber(
           selectedSticker.canvas
@@ -403,6 +410,8 @@
       pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
 
       if (pointers.size === 1) {
+        hadMultiPointerGesture = false;
+        beginStickerInteraction();
         dragStart = {
           x: event.clientX,
           y: event.clientY,
@@ -410,6 +419,8 @@
           translateY
         };
       } else if (pointers.size === 2) {
+        hadMultiPointerGesture = true;
+        endStickerInteraction(false);
         dragStart = {
           distance: pointerDistance(),
           angle: pointerAngle(),
@@ -422,6 +433,7 @@
     function onPointerMove(event) {
       if (!pointers.has(event.pointerId)) return;
       event.preventDefault();
+      disableInteractionTransition();
       pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
 
       if (pointers.size === 1 && dragStart && dragStart.x !== undefined) {
@@ -467,7 +479,61 @@
         };
       } else {
         dragStart = null;
+        endStickerInteraction(!hadMultiPointerGesture);
+        hadMultiPointerGesture = false;
       }
+    }
+
+    function beginStickerInteraction() {
+      if (!selectedSticker || !sticker) return;
+      clearInteractionMotionTimer();
+      interactionScale = prefersReducedMotion() ? 1 : 1.03;
+      selectedSticker.interactionScale = interactionScale;
+      sticker.classList.remove("is-settling");
+      sticker.classList.add("is-dragging");
+      if (!prefersReducedMotion()) {
+        sticker.classList.add("is-lifting");
+        interactionMotionTimer = window.setTimeout(() => {
+          if (sticker) sticker.classList.remove("is-lifting");
+          interactionMotionTimer = null;
+        }, 120);
+      }
+      applyStickerTransform();
+    }
+
+    function disableInteractionTransition() {
+      if (!sticker) return;
+      sticker.classList.remove("is-lifting", "is-settling");
+      clearInteractionMotionTimer();
+    }
+
+    function endStickerInteraction(settle) {
+      if (!selectedSticker || !sticker) return;
+      clearInteractionMotionTimer();
+      interactionScale = 1;
+      selectedSticker.interactionScale = 1;
+      sticker.classList.remove("is-dragging", "is-lifting");
+      if (settle && !prefersReducedMotion()) {
+        sticker.classList.add("is-settling");
+        interactionMotionTimer = window.setTimeout(() => {
+          if (sticker) sticker.classList.remove("is-settling");
+          interactionMotionTimer = null;
+        }, 190);
+      } else {
+        sticker.classList.remove("is-settling");
+      }
+      applyStickerTransform();
+    }
+
+    function clearInteractionMotionTimer() {
+      if (!interactionMotionTimer) return;
+      window.clearTimeout(interactionMotionTimer);
+      interactionMotionTimer = null;
+    }
+
+    function prefersReducedMotion() {
+      return window.matchMedia &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     }
 
     function pointerDistance() {
@@ -744,8 +810,9 @@
 
     function applyStickerTransform() {
       if (!sticker) return;
-      const horizontalScale = isFlipped ? -scale : scale;
-      sticker.style.transform = `translate(calc(-50% + ${translateX}px), calc(-50% + ${translateY}px)) rotate(${rotationDegrees}deg) scale(${horizontalScale}, ${scale})`;
+      const effectiveScale = scale * interactionScale;
+      const horizontalScale = isFlipped ? -effectiveScale : effectiveScale;
+      sticker.style.transform = `translate(calc(-50% + ${translateX}px), calc(-50% + ${translateY}px)) rotate(${rotationDegrees}deg) scale(${horizontalScale}, ${effectiveScale})`;
       saveSelectedStickerTransform();
     }
 
@@ -771,6 +838,7 @@
 
     function selectSticker(record) {
       saveSelectedStickerTransform();
+      endStickerInteraction(false);
       selectedSticker = record || null;
       if (!selectedSticker) {
         clearSelectedStickerRefs();
@@ -786,6 +854,7 @@
       translateX = selectedSticker.translateX;
       translateY = selectedSticker.translateY;
       scale = selectedSticker.scale;
+      interactionScale = selectedSticker.interactionScale || 1;
       rotationDegrees = selectedSticker.rotationDegrees;
       isFlipped = !!selectedSticker.isFlipped;
       createSelectionBox();
@@ -814,6 +883,7 @@
       translateX = 0;
       translateY = 0;
       scale = 1;
+      interactionScale = 1;
       rotationDegrees = 0;
       isFlipped = false;
     }
