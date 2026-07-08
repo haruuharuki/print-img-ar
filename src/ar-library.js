@@ -110,12 +110,12 @@
       "enabled": true,
       "targetIndex": 4,
       "imagePath": "./assets/targets/hasina.png",
-      "overlayPath": "https://pub-91ea9853cab9485495948b49cc3f67a3.r2.dev/overlays/hasina/pose-01/main-d84ce8a9e722b7361d3afea22e85fa651a023428fafec8175c8d6a420ab7deca.mp4",
-      "overlayBackgroundMode": "auto",
+      "overlayPath": "https://pub-91ea9853cab9485495948b49cc3f67a3.r2.dev/overlays/hasina/pose-01/main-ec20aba3c9614f58ea66b12d484f5e83bcfe45f568e4401673d84f95fbcf3469.mp4",
+      "overlayBackgroundMode": "opaque",
       "overlayType": "video",
       "overlay": {
-        "width": 2.349,
-        "height": 1.455,
+        "width": 1.906,
+        "height": 2.5,
         "position": "0 0 0.01",
         "rotation": "0 0 0"
       },
@@ -125,7 +125,7 @@
         "muted": true,
         "playsInline": true
       },
-      "updatedAt": "2026-07-08T06:57:26Z",
+      "updatedAt": "2026-07-08T07:12:09Z",
       "overlayMode": "opaque"
     }
   ]
