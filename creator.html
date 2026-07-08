@@ -249,6 +249,28 @@
         gap: 12px;
       }
 
+      .overlay-file-options {
+        display: inline-flex;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .overlay-background-mode {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        color: #f2f2f2;
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .overlay-background-mode select {
+        min-height: 32px;
+        max-width: 150px;
+      }
+
       .intro-toggle {
         display: inline-flex;
         align-items: center;
@@ -756,7 +778,8 @@
                 <input id="targetNameInput" type="text" placeholder="Example: Nuwa" />
                 <label class="control-label" for="targetImageInput">Target image</label>
                 <input id="targetImageInput" type="file" accept="image/png,image/jpeg,image/webp" />
-                <p id="compilerStatus" class="compiler-status">Choose a target image and MP4, MOV, or WebM overlay, then save it into the local library.</p>
+                <p class="compiler-status">Storage: Cloudflare R2 &mdash; Production</p>
+                <p id="compilerStatus" class="compiler-status">Choose a target image and optimized overlay, then save it into the production library.</p>
                 <progress id="compilerProgress" class="hidden" max="100" value="0"></progress>
               </div>
               <div class="compiler-preview">
@@ -767,10 +790,20 @@
               <div class="control-group">
                 <div class="overlay-file-header">
                   <label class="control-label" for="overlayMediaInput">Overlay video</label>
-                  <label class="intro-toggle" for="introLoopToggle">
-                    <input id="introLoopToggle" type="checkbox" />
-                    <span>Intro + Loop</span>
-                  </label>
+                  <div class="overlay-file-options">
+                    <label class="overlay-background-mode" for="overlayBackgroundMode">
+                      <span>Overlay background</span>
+                      <select id="overlayBackgroundMode">
+                        <option value="auto">Auto detect</option>
+                        <option value="transparent">Transparent</option>
+                        <option value="opaque">Has background</option>
+                      </select>
+                    </label>
+                    <label class="intro-toggle" for="introLoopToggle">
+                      <input id="introLoopToggle" type="checkbox" />
+                      <span>Intro + Loop</span>
+                    </label>
+                  </div>
                 </div>
                 <div id="overlayFileGrid" class="overlay-file-grid">
                   <div class="overlay-file-card">
@@ -820,7 +853,7 @@
               </div>
             </div>
             <div class="compiler-actions">
-              <button id="compileTargetButton" class="action-button primary" type="button" disabled>Save target to library</button>
+              <button id="compileTargetButton" class="action-button primary" type="button" disabled>Save to Production</button>
               <button id="downloadMindButton" class="action-button secondary" type="button" disabled>Download last targets.mind</button>
             </div>
           </section>

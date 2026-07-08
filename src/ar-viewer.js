@@ -132,8 +132,8 @@
             targetId: targetState.target.id,
             phase: targetState.videoPhase
           });
-          resetTargetVideoSequence(targetState);
-          await targetState.video.play();
+          await resetTargetVideoSequence(targetState);
+          await playTargetVideo(targetState, "target-found");
           logViewerDiagnostic("target-found-play-success", {
             targetId: targetState.target.id,
             phase: targetState.videoPhase
@@ -273,20 +273,11 @@
     };
 
     video.id = videoId;
-    video.preload = "auto";
-    video.src = activeOverlayPath;
-    video.loop = hasVideoSequence ? false : videoConfig.loop;
-    video.muted = videoConfig.muted;
-    video.playsInline = videoConfig.playsInline;
-    video.crossOrigin = "anonymous";
-    video.toggleAttribute("loop", video.loop);
-    video.toggleAttribute("muted", videoConfig.muted);
-    video.toggleAttribute("playsinline", videoConfig.playsInline);
-    video.toggleAttribute("webkit-playsinline", videoConfig.playsInline);
+    configureTargetVideoElement(video, videoConfig, hasVideoSequence ? false : videoConfig.loop);
     video.addEventListener("error", () => {
+      logViewerDiagnostic("target-video-error", getTargetVideoDiagnostic(targetState));
       statusBox.textContent = `This browser could not play ${fileNameFromPath(video.currentSrc || video.src || activeOverlayPath)}. Try a browser that supports this overlay format.`;
     });
-    assetsRoot.append(video);
 
     const entity = document.createElement("a-entity");
     entity.id = `imageTarget-${safeId}`;
@@ -302,7 +293,7 @@
       overlay.setAttribute("packed-alpha-video", `video: #${videoId}`);
     } else {
       overlay.setAttribute("src", `#${videoId}`);
-      overlay.setAttribute("material", "transparent: true; alphaTest: 0.01");
+      overlay.setAttribute("material", videoMaterialForTarget(target));
     }
 
     entity.append(overlay);
@@ -316,8 +307,14 @@
       videoPhase: hasVideoSequence ? "intro" : "single",
       entity,
       overlay,
-      usesPackedAlpha
+      usesPackedAlpha,
+      videoSourceToken: 0,
+      videoReadyPromise: null
     };
+    assetsRoot.append(video);
+    video.src = activeOverlayPath;
+    video.load();
+    waitForTargetVideoReady(targetState, activeOverlayPath);
     video.addEventListener("ended", () => handleTargetVideoEnded(targetState));
     return targetState;
   }
@@ -394,11 +391,36 @@
 
   function getTargetVideoSources(target, usesPackedAlpha) {
     return {
-      intro: usesPackedAlpha ? target.overlayPackedPath : target.overlayPath,
-      loop: usesPackedAlpha
-        ? target.overlayLoopPackedPath || null
-        : target.overlayLoopPath || null
+      intro: versionedRemoteMediaUrl(
+        usesPackedAlpha ? target.overlayPackedPath : target.overlayPath,
+        target
+      ),
+      loop: versionedRemoteMediaUrl(
+        usesPackedAlpha
+          ? target.overlayLoopPackedPath || null
+          : target.overlayLoopPath || null,
+        target
+      )
     };
+  }
+
+  function videoMaterialForTarget(target) {
+    return target.overlayMode === "opaque" || target.overlayBackgroundMode === "opaque"
+      ? "shader: flat; transparent: false"
+      : "transparent: true; alphaTest: 0.01";
+  }
+
+  function configureTargetVideoElement(video, videoConfig, shouldLoop) {
+    video.crossOrigin = "anonymous";
+    video.preload = "auto";
+    video.muted = videoConfig.muted;
+    video.defaultMuted = videoConfig.muted;
+    video.playsInline = videoConfig.playsInline;
+    video.loop = shouldLoop;
+    video.toggleAttribute("playsinline", videoConfig.playsInline);
+    video.toggleAttribute("webkit-playsinline", videoConfig.playsInline);
+    video.toggleAttribute("muted", videoConfig.muted);
+    video.toggleAttribute("loop", shouldLoop);
   }
 
   function resetTargetVideoSequence(targetState) {
@@ -407,29 +429,33 @@
       targetState.videoPhase = "single";
       return;
     }
-    setTargetVideoPhase(targetState, "intro", 0);
+    return setTargetVideoPhase(targetState, "intro", 0);
   }
 
-  function handleTargetVideoEnded(targetState) {
+  async function handleTargetVideoEnded(targetState) {
     if (!targetState || !targetState.hasVideoSequence || targetState.videoPhase !== "intro") return;
-    setTargetVideoPhase(targetState, "loop", 0);
-    targetState.video.play().catch((error) => {
-      console.warn("Loop video play was blocked", error);
-    });
+    const isReady = await setTargetVideoPhase(targetState, "loop", 0);
+    if (isReady) {
+      await playTargetVideo(targetState, "loop");
+    }
   }
 
-  function setTargetVideoPhase(targetState, phase, currentTime) {
+  async function setTargetVideoPhase(targetState, phase, currentTime) {
     const source = phase === "loop" ? targetState.videoSources.loop : targetState.videoSources.intro;
-    if (!source) return;
+    if (!source) return false;
     const video = targetState.video;
-    if (!isSameVideoSource(video, source)) {
-      video.pause();
-      video.src = source;
-      video.load();
-    }
     targetState.videoPhase = phase;
     video.loop = phase === "loop" ? true : targetState.hasVideoSequence ? false : targetState.videoConfig.loop;
     video.toggleAttribute("loop", video.loop);
+    if (!isSameVideoSource(video, source)) {
+      video.pause();
+      video.crossOrigin = "anonymous";
+      video.src = source;
+      video.load();
+      targetState.videoReadyPromise = waitForTargetVideoReady(targetState, source);
+    }
+    const isReady = await targetState.videoReadyPromise;
+    if (!isReady || !isSameVideoSource(video, source)) return false;
     if (Number.isFinite(currentTime)) {
       try {
         video.currentTime = currentTime;
@@ -437,6 +463,101 @@
         console.warn("Could not set AR video time", error);
       }
     }
+    return true;
+  }
+
+  function waitForTargetVideoReady(targetState, source) {
+    const video = targetState.video;
+    const token = (targetState.videoSourceToken || 0) + 1;
+    targetState.videoSourceToken = token;
+
+    if (video.readyState >= HTMLMediaElement.HAVE_METADATA && hasVideoDimensions(video)) {
+      logViewerDiagnostic("target-video-ready", getTargetVideoDiagnostic(targetState));
+      return Promise.resolve(true);
+    }
+
+    const readyPromise = new Promise((resolve, reject) => {
+      const cleanup = () => {
+        video.removeEventListener("loadedmetadata", onLoadedMetadata);
+        video.removeEventListener("canplay", onCanPlay);
+        video.removeEventListener("error", onError);
+      };
+      const isStale = () => targetState.videoSourceToken !== token || !isSameVideoSource(video, source);
+      const maybeResolve = (eventName) => {
+        if (isStale()) {
+          cleanup();
+          resolve(false);
+          return;
+        }
+        logViewerDiagnostic(eventName, getTargetVideoDiagnostic(targetState));
+        if (hasVideoDimensions(video)) {
+          cleanup();
+          resolve(true);
+        }
+      };
+      const onLoadedMetadata = () => maybeResolve("target-video-loadedmetadata");
+      const onCanPlay = () => maybeResolve("target-video-canplay");
+      const onError = () => {
+        if (isStale()) {
+          cleanup();
+          resolve(false);
+          return;
+        }
+        cleanup();
+        reject(new Error("Target video failed to load"));
+      };
+
+      video.addEventListener("loadedmetadata", onLoadedMetadata);
+      video.addEventListener("canplay", onCanPlay);
+      video.addEventListener("error", onError);
+    }).catch((error) => {
+      logViewerDiagnostic("target-video-ready-error", {
+        ...getTargetVideoDiagnostic(targetState),
+        name: error && error.name,
+        message: error && error.message
+      });
+      return false;
+    });
+
+    targetState.videoReadyPromise = readyPromise;
+    return readyPromise;
+  }
+
+  function hasVideoDimensions(video) {
+    return video.videoWidth > 0 && video.videoHeight > 0;
+  }
+
+  async function playTargetVideo(targetState, reason) {
+    try {
+      await targetState.videoReadyPromise;
+      await targetState.video.play();
+    } catch (error) {
+      logViewerDiagnostic("target-video-play-warning", {
+        ...getTargetVideoDiagnostic(targetState),
+        reason,
+        name: error && error.name,
+        message: error && error.message
+      });
+      console.warn("Video play was blocked", error);
+    }
+  }
+
+  function getTargetVideoDiagnostic(targetState) {
+    const video = targetState && targetState.video;
+    const mediaError = video && video.error;
+    return {
+      "target.id": targetState && targetState.target && targetState.target.id,
+      targetId: targetState && targetState.target && targetState.target.id,
+      currentSrc: video ? video.currentSrc || video.src || "" : "",
+      readyState: video ? video.readyState : undefined,
+      networkState: video ? video.networkState : undefined,
+      videoWidth: video ? video.videoWidth : undefined,
+      videoHeight: video ? video.videoHeight : undefined,
+      "MediaError.code": mediaError ? mediaError.code : undefined,
+      "MediaError.message": mediaError ? mediaError.message : undefined,
+      mediaErrorCode: mediaError ? mediaError.code : undefined,
+      mediaErrorMessage: mediaError ? mediaError.message : undefined
+    };
   }
 
   function isSameVideoSource(video, source) {
@@ -501,7 +622,7 @@
 
   function buildMindARAttribute(config, library) {
     const parts = [
-      `imageTargetSrc: ${library.targetFile}`,
+      `imageTargetSrc: ${versionedAssetUrl(library.targetFile)}`,
       "autoStart: false",
       `maxTrack: ${targets.length}`,
       "uiScanning: yes",
@@ -518,6 +639,35 @@
     }
 
     return `${parts.join("; ")};`;
+  }
+
+  function versionedAssetUrl(url) {
+    const deployVersion = window.AR_DEPLOY_VERSION;
+    if (!deployVersion || !url || /[?&]v=/.test(url)) {
+      return url;
+    }
+
+    const separator = url.includes("?") ? "&" : "?";
+    return `${url}${separator}v=${encodeURIComponent(deployVersion)}`;
+  }
+
+  function versionedRemoteMediaUrl(url, target) {
+    if (!isRemoteUrl(url)) return url;
+
+    const version = window.AR_DEPLOY_VERSION || (target && target.updatedAt);
+    if (!version) return url;
+
+    try {
+      const parsedUrl = new URL(url);
+      parsedUrl.searchParams.set("v", version);
+      return parsedUrl.href;
+    } catch (_error) {
+      return url;
+    }
+  }
+
+  function isRemoteUrl(url) {
+    return /^https?:\/\//i.test(String(url || ""));
   }
 
   function getEnabledTargets(library) {

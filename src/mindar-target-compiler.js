@@ -27,6 +27,7 @@
   const overlayVideoPreview = document.querySelector("#overlayVideoPreview");
   const overlayStatus = document.querySelector("#overlayMediaStatus");
   const overlayLoopStatus = document.querySelector("#overlayLoopMediaStatus");
+  const overlayBackgroundModeInput = document.querySelector("#overlayBackgroundMode");
   const optimizerResolution = document.querySelector("#optimizerResolution");
   const optimizerFrameRate = document.querySelector("#optimizerFrameRate");
   const optimizerQuality = document.querySelector("#optimizerQuality");
@@ -51,6 +52,7 @@
   let compilerLoadPromise = null;
   let editingTargetId = null;
   let optimizerAvailable = false;
+  let selectedOverlayBackgroundMode = "auto";
 
   refreshOptimizerStatus();
 
@@ -78,7 +80,7 @@
       nameInput.value = fileBaseName(file.name);
     }
     renderTargetPreview(file);
-    setStatus(`Target ready: ${file.name}. Choose an MP4, MOV, or WebM overlay, then save to library.`);
+    setStatus(`Target ready: ${file.name}. Choose an optimized overlay, then save to Production.`);
     updateCompileButton();
   });
 
@@ -165,6 +167,14 @@
   if (optimizeButton) {
     optimizeButton.addEventListener("click", optimizeOverlayForPreview);
   }
+  if (overlayBackgroundModeInput) {
+    overlayBackgroundModeInput.addEventListener("change", () => {
+      selectedOverlayBackgroundMode = overlayBackgroundMode();
+      selectedPackedOverlayFile = null;
+      selectedLoopPackedOverlayFile = null;
+      updateCompileButton();
+    });
+  }
 
   compileButton.addEventListener("click", async () => {
     if (!selectedImageFile || !selectedOverlayFile) return;
@@ -226,7 +236,7 @@
       compiledMindFileName = `${target.id}.library.targets.mind`;
       progress.value = 100;
 
-      setStatus("Saving files to local library...");
+      setStatus("Uploading overlays to Cloudflare R2...");
       const result = await saveTargetToLibrary({
         library: nextLibrary,
         target,
@@ -238,12 +248,16 @@
         targetsMind: compiledMindBlob
       });
 
-      validateSavedTarget(result.library, target);
-      window.AR_LIBRARY = result.library;
+      setStatus("Verifying R2 objects complete. Refreshing production library...");
+      const refreshedLibrary = await reloadProductionLibrary(result);
+      validateSavedTarget(refreshedLibrary, target);
       window.dispatchEvent(new CustomEvent("ar-library-updated"));
       downloadButton.disabled = false;
       const action = existingTarget ? "Updated" : "Saved";
-      setStatus(`${action} ${target.name}. Active targets: ${result.activeTargets}. Refresh Creator/Viewer to use the updated library.`);
+      const recoveryNote = result.r2Status && result.r2Status.recoveryPath
+        ? ` Recovery: ${result.r2Status.recoveryPath}`
+        : "";
+      setStatus(`${action} ${target.name} to Cloudflare R2 - Production. Active targets: ${result.activeTargets}.${recoveryNote} Ready.`);
     } catch (error) {
       console.error(error);
       progress.classList.add("hidden");
@@ -278,10 +292,22 @@
           message: "Packed alpha must be available for both intro and loop, or neither one."
         };
       }
+      if (overlayBackgroundMode() === "transparent" && (!selectedPackedOverlayFile || !selectedLoopPackedOverlayFile)) {
+        return {
+          ok: false,
+          message: "This overlay was marked Transparent, but no alpha channel was detected."
+        };
+      }
     } else if (target.overlayLoopPath || selectedLoopOverlayFile || selectedLoopPackedOverlayFile) {
       return {
         ok: false,
         message: "Loop media is still selected while Intro + Loop is off. Turn Intro + Loop on or choose the main video again."
+      };
+    }
+    if (overlayBackgroundMode() === "transparent" && !selectedPackedOverlayFile) {
+      return {
+        ok: false,
+        message: "This overlay was marked Transparent, but no alpha channel was detected."
       };
     }
 
@@ -296,14 +322,22 @@
     if (!savedTarget) {
       throw new Error("Helper saved the library, but the target was missing from the response.");
     }
-    if (expectedTarget.overlayLoopPath && savedTarget.overlayLoopPath !== expectedTarget.overlayLoopPath) {
+    if (!isRemoteOverlayUrl(savedTarget.overlayPath)) {
+      throw new Error("Helper saved the target without a Cloudflare R2 overlay URL.");
+    }
+    if (expectedTarget.overlayLoopPath && !isRemoteOverlayUrl(savedTarget.overlayLoopPath)) {
       throw new Error(
-        "Helper saved the target without the loop overlay path. Restart the Creator helper, then save again."
+        "Helper saved the target without a Cloudflare R2 loop overlay URL. Restart the Creator helper, then save again."
       );
     }
-    if (expectedTarget.overlayLoopPackedPath && savedTarget.overlayLoopPackedPath !== expectedTarget.overlayLoopPackedPath) {
+    if (expectedTarget.overlayPackedPath && !isRemoteOverlayUrl(savedTarget.overlayPackedPath)) {
       throw new Error(
-        "Helper saved the target without the packed loop overlay path. Restart the Creator helper, then save again."
+        "Helper saved the target without a Cloudflare R2 packed overlay URL. Restart the Creator helper, then save again."
+      );
+    }
+    if (expectedTarget.overlayLoopPackedPath && !isRemoteOverlayUrl(savedTarget.overlayLoopPackedPath)) {
+      throw new Error(
+        "Helper saved the target without a Cloudflare R2 packed loop overlay URL. Restart the Creator helper, then save again."
       );
     }
   }
@@ -314,6 +348,8 @@
     const imageExt = fileExtension(selectedImageFile.name, ".png");
     const overlayExt = fileExtension(selectedOverlayFile.name, ".mp4");
     const loopOverlayExt = selectedLoopOverlayFile ? fileExtension(selectedLoopOverlayFile.name, ".mp4") : "";
+    const backgroundMode = overlayBackgroundMode();
+    const hasPackedFallback = Boolean(selectedPackedOverlayFile && (!selectedLoopOverlayFile || selectedLoopPackedOverlayFile));
     const existing = (library.targets || []).find((item) => item.id === id);
     const baseOverlay = (existing && existing.overlay) || (library.targets && library.targets[0] && library.targets[0].overlay) || {
       width: 1,
@@ -329,15 +365,16 @@
       targetIndex: 0,
       imagePath: `./assets/targets/${id}${imageExt}`,
       overlayPath: `./assets/overlays/${id}${overlayExt}`,
+      overlayBackgroundMode: backgroundMode,
+      overlayMode: hasPackedFallback ? "auto-alpha" : "opaque",
       ...(selectedLoopOverlayFile
         ? {
             overlayLoopPath: `./assets/overlays/${id}-loop${loopOverlayExt}`
           }
         : {}),
-      ...(selectedPackedOverlayFile && (!selectedLoopOverlayFile || selectedLoopPackedOverlayFile)
+      ...(hasPackedFallback
         ? {
-            overlayPackedPath: `./assets/overlays/${id}-packed.mp4`,
-            overlayMode: "auto-alpha"
+            overlayPackedPath: `./assets/overlays/${id}-packed.mp4`
           }
         : {}),
       ...(selectedLoopPackedOverlayFile
@@ -434,9 +471,15 @@
     });
     const result = await response.json();
     if (!response.ok || !result.ok) {
-      throw new Error(result.error || "helper save failed");
+      const error = new Error(result.error || "helper save failed");
+      error.details = result.details || {};
+      throw error;
     }
     return result;
+  }
+
+  function isRemoteOverlayUrl(value) {
+    return /^https?:\/\//.test(String(value || ""));
   }
 
   async function deleteTargetFromLibrary(targetId) {
@@ -452,6 +495,7 @@
       throw new Error("Cannot delete the last enabled target in this prototype.");
     }
 
+    setStatus(`Preparing delete for ${target.id}...`);
     const Compiler = await loadCompiler();
     const targetImages = [];
     for (let index = 0; index < activeTargets.length; index++) {
@@ -471,6 +515,7 @@
 
     const exported = compiler.exportData();
     const targetsMind = new Blob([exported], { type: "application/octet-stream" });
+    setStatus(`Updating target library for ${target.id}...`);
     const result = await deleteTargetWithHelper({
       library: nextLibrary,
       target,
@@ -479,7 +524,9 @@
 
     window.AR_LIBRARY = result.library;
     clearCompiledResult();
-    setStatus(`Deleted ${target.name}. Files moved to assets/_deleted for 7 days.`);
+    setStatus(result.r2DeletePending && result.r2DeletePending.pending
+      ? `Deleted ${target.name}. R2 cleanup pending at ${result.r2DeletePending.recoveryPath}.`
+      : `Deleted ${target.name}. Files moved to assets/_deleted for 7 days.`);
     return result;
   }
 
@@ -620,7 +667,9 @@
     });
     const result = await response.json();
     if (!response.ok || !result.ok) {
-      throw new Error(result.error || "helper delete failed");
+      const error = new Error(result.error || "helper delete failed");
+      error.details = result.details || {};
+      throw error;
     }
     return result;
   }
@@ -783,8 +832,8 @@
     const pendingId = pendingTargetId();
     compileButton.textContent =
       editingTargetId || (pendingId && findLibraryTarget(pendingId))
-        ? "Update existing target"
-        : "Save new target";
+        ? "Update in Production"
+        : "Save to Production";
     updateOptimizerControls();
   }
 
@@ -805,9 +854,10 @@
   }
 
   function startEditingTarget(targetId) {
-    const target = findLibraryTarget(targetId);
+    const canonicalTargetId = String(targetId || "");
+    const target = findLibraryTarget(canonicalTargetId);
     if (!target) {
-      setStatus(`Target not found: ${targetId}`);
+      setStatus(`Target not found: ${canonicalTargetId}`);
       return;
     }
 
@@ -825,12 +875,13 @@
       overlayLoopInput.value = "";
     }
     setIntroLoopMode(Boolean(target.overlayLoopPath), { clearLoopSelection: false });
+    setOverlayBackgroundMode(target.overlayBackgroundMode || (target.overlayMode === "opaque" ? "opaque" : target.overlayPackedPath ? "transparent" : "auto"));
     nameInput.value = target.name || target.id;
     clearCompiledResult();
     renderExistingTargetPreview(target);
     renderExistingOverlayPreview(target);
     setStatus(
-      `Editing existing target: ${target.name}. Current image: ${fileNameFromPath(target.imagePath)}. Choose a new target image only if you want to replace it.`
+      `Editing existing target: ${target.name} (${target.id}). Current image: ${fileNameFromPath(target.imagePath)}. Choose a new target image only if you want to replace it.`
     );
     overlayStatus.textContent =
       `Current overlay: ${fileNameFromPath(target.overlayPath)}. Choose a new MP4, MOV, or WebM only if you want to replace it.`;
@@ -864,7 +915,10 @@
     overlayImagePreview.classList.add("hidden");
     overlayImagePreview.removeAttribute("src");
     overlayVideoPreview.pause();
-    overlayVideoPreview.src = target.overlayPath;
+    overlayVideoPreview.removeAttribute("src");
+    overlayVideoPreview.load();
+    overlayVideoPreview.crossOrigin = "anonymous";
+    overlayVideoPreview.src = previewMediaUrl(target.overlayPath, target.updatedAt);
     overlayVideoPreview.classList.remove("hidden");
     overlayVideoPreview.load();
   }
@@ -894,6 +948,57 @@
 
   function isIntroLoopModeEnabled() {
     return Boolean(introLoopToggle && introLoopToggle.checked);
+  }
+
+  function overlayBackgroundMode() {
+    const value = overlayBackgroundModeInput ? overlayBackgroundModeInput.value : selectedOverlayBackgroundMode;
+    return ["auto", "transparent", "opaque"].includes(value) ? value : "auto";
+  }
+
+  function setOverlayBackgroundMode(value) {
+    selectedOverlayBackgroundMode = ["auto", "transparent", "opaque"].includes(value) ? value : "auto";
+    if (overlayBackgroundModeInput) {
+      overlayBackgroundModeInput.value = selectedOverlayBackgroundMode;
+    }
+  }
+
+  async function reloadProductionLibrary(result) {
+    const savedTarget = result && result.library && Array.isArray(result.library.targets)
+      ? result.library.targets.find((item) => item.id === result.targetId)
+      : null;
+    const version = (savedTarget && savedTarget.updatedAt) || Date.now();
+    await loadLibraryScript(version);
+    return window.AR_LIBRARY;
+  }
+
+  function loadLibraryScript(version) {
+    return new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      const cacheBust = encodeURIComponent(String(version || Date.now()));
+      script.src = `./src/ar-library.js?v=${cacheBust}`;
+      script.async = false;
+      script.onload = () => {
+        script.remove();
+        resolve(window.AR_LIBRARY);
+      };
+      script.onerror = () => {
+        script.remove();
+        reject(new Error("Could not refresh production library after save."));
+      };
+      document.head.append(script);
+    });
+  }
+
+  function previewMediaUrl(url, version) {
+    if (!url || !version) return url;
+    try {
+      const mediaUrl = new URL(url, window.location.href);
+      mediaUrl.searchParams.set("v", version);
+      return mediaUrl.href;
+    } catch (_error) {
+      const separator = String(url).includes("?") ? "&" : "?";
+      return `${url}${separator}v=${encodeURIComponent(version)}`;
+    }
   }
 
   function downloadMindBlob(blob, fileName) {
@@ -1116,7 +1221,7 @@
 
       optimizerStatus.textContent =
         `${conversionMessage} ` +
-        `Save Target will use the optimized WebM.${packedMessage}`;
+        `Save Target will use the optimized ${optimizedOverlayLabel(introResult.file)}.${packedMessage}`;
     } catch (error) {
       selectedPackedOverlayFile = null;
       selectedLoopPackedOverlayFile = null;
@@ -1130,9 +1235,12 @@
   }
 
   function packedOptimizationMessage(introResult, loopResult) {
+    if (overlayBackgroundMode() === "opaque") {
+      return " Opaque overlay mode selected.";
+    }
     if (loopResult) {
       if (introResult.packedFile && loopResult.packedFile) {
-        return ` Packed iPhone fallbacks ready: ${introResult.packedFile.name} and ${loopResult.packedFile.name}.`;
+        return " Transparent overlay detected. Packed fallback ready.";
       }
 
       const skippedReasons = [introResult.packedSkippedReason, loopResult.packedSkippedReason]
@@ -1144,7 +1252,11 @@
     }
 
     if (introResult.packedFile) {
-      return ` Packed iPhone fallback ready: ${introResult.packedFile.name} (${formatBytes(introResult.packedFile.size)}).`;
+      return " Transparent overlay detected. Packed fallback ready.";
+    }
+
+    if (overlayBackgroundMode() === "auto" && !introResult.inputHasAlpha) {
+      return " Opaque overlay detected. Packed alpha fallback is not required.";
     }
 
     return introResult.packedSkippedReason
@@ -1159,6 +1271,7 @@
     form.append("resolution", optimizerResolution.value);
     form.append("frameRate", optimizerFrameRate.value);
     form.append("quality", optimizerQuality.value);
+    form.append("backgroundMode", overlayBackgroundMode());
 
     const response = await fetch("/api/optimizer/convert", {
       method: "POST",
@@ -1178,6 +1291,7 @@
 
     const blob = await response.blob();
     const fileName = response.headers.get("X-Output-File-Name") || optimizedFileName(sourceFile.name);
+    const contentType = response.headers.get("X-Output-Content-Type") || contentTypeForFile(fileName);
     if (blob.size > MAX_OVERLAY_FILE_BYTES) {
       throw new Error(`Optimized file is still ${formatBytes(blob.size)}. Try Small quality or 720 px.`);
     }
@@ -1188,6 +1302,8 @@
       response.headers.get("X-Packed-File-Name") ||
       `${fileBaseName(sourceFile.name)}-packed.mp4`;
     const packedSkippedReason = response.headers.get("X-Packed-Skipped-Reason") || "";
+    const backgroundMode = response.headers.get("X-Overlay-Background-Mode") || "auto";
+    const inputHasAlpha = response.headers.get("X-Input-Has-Alpha") === "true";
     const packedError = response.headers.get("X-Packed-Error") || "";
     let packedFile = null;
 
@@ -1233,9 +1349,11 @@
     }
 
     return {
-      file: new File([blob], fileName, { type: "video/webm" }),
+      file: new File([blob], fileName, { type: contentType }),
       packedFile,
       packedSkippedReason,
+      backgroundMode,
+      inputHasAlpha,
       originalSize: Number(response.headers.get("X-Original-Size")) || sourceFile.size,
       optimizedSize: Number(response.headers.get("X-Optimized-Size")) || blob.size
     };
@@ -1243,6 +1361,15 @@
 
   function optimizedFileName(fileName) {
     return `${fileBaseName(fileName)}-optimized.webm`;
+  }
+
+  function contentTypeForFile(fileName) {
+    return OVERLAY_MIME_TYPES[fileExtension(fileName, ".webm")] || "video/webm";
+  }
+
+  function optimizedOverlayLabel(file) {
+    const ext = fileExtension(file && file.name, ".webm").toUpperCase().replace(".", "");
+    return ext || "overlay";
   }
 
   window.CreatorProjectSetup = {

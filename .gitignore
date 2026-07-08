@@ -1,2 +1,10 @@
-﻿__pycache__/
+__pycache__/
 *.pyc
+.creator-temp/
+.creator-recovery/
+assets/overlays/**/*.mp4
+assets/overlays/**/*.webm
+assets/overlays/**/*.mov
+assets/overlays/*.mp4
+assets/overlays/*.webm
+assets/overlays/*.mov

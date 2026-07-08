@@ -3,8 +3,10 @@ from pathlib import Path
 import argparse
 import cgi
 import datetime
+import hashlib
 import json
 import math
+import os
 import re
 import secrets
 import shutil
@@ -19,10 +21,13 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "src" / "ar-config.js"
 CONFIG_REPO_PATH = "src/ar-config.js"
 LIBRARY_PATH = ROOT / "src" / "ar-library.js"
+DEPLOY_VERSION_PATH = ROOT / "src" / "ar-deploy-version.js"
+DEPLOY_VERSION_REPO_PATH = "src/ar-deploy-version.js"
 TARGETS_DIR = ROOT / "assets" / "targets"
 OVERLAYS_DIR = ROOT / "assets" / "overlays"
 TARGETS_MIND_PATH = ROOT / "assets" / "targets.mind"
 DELETED_DIR = ROOT / "assets" / "_deleted"
+CREATOR_RECOVERY_DIR = ROOT / ".creator-recovery"
 COMMIT_MESSAGE = "Update AR overlay config"
 MAX_ACTIVE_TARGETS = 15
 MAX_MULTIPART_BYTES = 120 * 1024 * 1024
@@ -31,6 +36,20 @@ DELETED_RETENTION_DAYS = 7
 LIBRARY_DEPLOY_MESSAGE = "feat: deploy multi-target AR library"
 DEPLOY_LOCK = threading.Lock()
 OVERLAY_EXTENSIONS = {".mp4", ".mov", ".webm"}
+R2_ENV_VARS = (
+    "R2_ACCOUNT_ID",
+    "R2_ACCESS_KEY_ID",
+    "R2_SECRET_ACCESS_KEY",
+    "R2_BUCKET_NAME",
+    "R2_PUBLIC_BASE_URL",
+)
+R2_CACHE_CONTROL = "public, max-age=31536000, immutable"
+R2_CONTENT_TYPES = {
+    ".webm": "video/webm",
+    ".mp4": "video/mp4",
+}
+PENDING_R2_DELETE_FILE = "pending-r2-delete.json"
+ALLOWED_R2_DELETE_PREFIXES = ("overlays/",)
 PACKED_CACHE_DIR = Path(tempfile.gettempdir()) / "print-ar-packed-cache"
 PACKED_CACHE_TTL_SECONDS = 15 * 60
 PACKED_DOWNLOADS = {}
@@ -66,6 +85,11 @@ class CreatorHelperHandler(SimpleHTTPRequestHandler):
         sys.stdout.write("%s - %s\n" % (self.address_string(), format % args))
 
     def end_headers(self):
+        request_path = self.path.split("?", 1)[0]
+        if request_path in {"/src/ar-deploy-version.js", "/src/ar-library.js", "/assets/targets.mind"}:
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
         self.send_header("X-Content-Type-Options", "nosniff")
         super().end_headers()
 
@@ -127,7 +151,7 @@ class CreatorHelperHandler(SimpleHTTPRequestHandler):
                 result = optimize_overlay_video(form)
                 self.send_binary(
                     result["data"],
-                    "video/webm",
+                    result["contentType"],
                     optimizer_response_headers(result),
                 )
             except DeployError as error:
@@ -506,6 +530,7 @@ def optimizer_response_headers(result):
         "X-Original-Size": str(result["originalSize"]),
         "X-Optimized-Size": str(result["optimizedSize"]),
         "X-Output-File-Name": result["fileName"],
+        "X-Output-Content-Type": result["contentType"],
     }
     if "packedCreated" in result:
         headers["X-Packed-Created"] = "true" if result["packedCreated"] else "false"
@@ -523,6 +548,10 @@ def optimizer_response_headers(result):
         headers["X-Packed-Skipped-Reason"] = result["packedSkippedReason"]
     if result.get("packedError"):
         headers["X-Packed-Error"] = result["packedError"]
+    if result.get("backgroundMode"):
+        headers["X-Overlay-Background-Mode"] = result["backgroundMode"]
+    if "inputHasAlpha" in result:
+        headers["X-Input-Has-Alpha"] = "true" if result["inputHasAlpha"] else "false"
     return headers
 
 
@@ -631,45 +660,87 @@ def optimize_overlay_video(form):
     resolution = optimizer_choice(required_form_text(form, "resolution"), {"720", "1080"}, "resolution")
     frame_rate = optimizer_choice(required_form_text(form, "frameRate"), {"24", "30"}, "frameRate")
     quality = optimizer_choice(required_form_text(form, "quality"), {"small", "balanced", "high"}, "quality")
+    background_mode = optimizer_background_mode(optional_form_text(form, "backgroundMode"))
     source_ext = overlay_extension(overlay_video.filename)
-    output_name = f"{Path(overlay_video.filename or 'overlay').stem}-optimized.webm"
-    crf_by_quality = {
+    vp9_crf_by_quality = {
         "small": "42",
         "balanced": "34",
         "high": "28",
+    }
+    h264_crf_by_quality = {
+        "small": "32",
+        "balanced": "26",
+        "high": "20",
     }
 
     with tempfile.TemporaryDirectory(prefix="print-ar-optimizer-") as temp_dir:
         temp_path = Path(temp_dir)
         input_path = temp_path / f"input{source_ext}"
-        output_path = temp_path / "output.webm"
         write_temp_upload(overlay_video, input_path)
+        alpha_status = input_alpha_status(input_path, status["ffprobePath"])
+        if background_mode == "transparent" and not alpha_status["hasAlpha"]:
+            raise DeployError(
+                "This overlay was marked Transparent, but no alpha channel was detected.",
+                status=409,
+                details={"stage": stage, "fileName": overlay_video.filename},
+            )
 
         vf = f"fps={frame_rate},scale='min({resolution},iw)':-2:flags=lanczos"
-        command = [
-            status["ffmpegPath"],
-            "-y",
-            "-i",
-            str(input_path),
-            "-an",
-            "-vf",
-            vf,
-            "-c:v",
-            "libvpx-vp9",
-            "-pix_fmt",
-            "yuva420p",
-            "-auto-alt-ref",
-            "0",
-            "-b:v",
-            "0",
-            "-crf",
-            crf_by_quality[quality],
-            "-deadline",
-            "good",
-            "-row-mt",
-            "1",
-            str(output_path),
-        ]
+        output_has_alpha = alpha_status["hasAlpha"] and background_mode in {"auto", "transparent"}
+        output_ext = ".webm" if output_has_alpha else ".mp4"
+        output_path = temp_path / f"output{output_ext}"
+        output_name = f"{Path(overlay_video.filename or 'overlay').stem}-optimized{output_ext}"
+        content_type = R2_CONTENT_TYPES[output_ext]
+        if output_has_alpha:
+            command = [
+                status["ffmpegPath"],
+                "-y",
+                "-i",
+                str(input_path),
+                "-an",
+                "-vf",
+                vf,
+                "-c:v",
+                "libvpx-vp9",
+                "-pix_fmt",
+                "yuva420p",
+                "-metadata:s:v:0",
+                "alpha_mode=1",
+                "-auto-alt-ref",
+                "0",
+                "-b:v",
+                "0",
+                "-crf",
+                vp9_crf_by_quality[quality],
+                "-deadline",
+                "good",
+                "-row-mt",
+                "1",
+                str(output_path),
+            ]
+        else:
+            command = [
+                status["ffmpegPath"],
+                "-y",
+                "-i",
+                str(input_path),
+                "-an",
+                "-vf",
+                vf,
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-metadata:s:v:0",
+                "alpha_mode=0",
+                "-crf",
+                h264_crf_by_quality[quality],
+                "-preset",
+                "medium",
+                "-movflags",
+                "+faststart",
+                str(output_path),
+            ]
         result = run_subprocess_text(command)
         if result.returncode != 0:
             raise DeployError(
@@ -701,36 +772,37 @@ def optimize_overlay_video(form):
             "packedSkippedReason": None,
             "packedError": None,
         }
-        alpha_status = input_alpha_status(input_path, status["ffprobePath"])
         packed_result["inputHasAlpha"] = alpha_status["hasAlpha"]
         packed_result["inputPixFmt"] = alpha_status.get("pixFmt")
         packed_result["inputCodecName"] = alpha_status.get("codecName")
-        if alpha_status["hasAlpha"]:
+        packed_result["inputAlphaMode"] = alpha_status.get("alphaMode")
+        packed_result["backgroundMode"] = background_mode
+        should_create_packed = alpha_status["hasAlpha"] and background_mode in {"auto", "transparent"}
+        if should_create_packed:
             packed_name = packed_alpha_output_name(overlay_video.filename)
             packed_path = temp_path / packed_name
-            try:
-                packed = create_packed_alpha_mp4(
-                    input_path,
-                    packed_path,
-                    resolution,
-                    frame_rate,
-                    status["ffmpegPath"],
-                    quality,
-                )
-                packed_result.update(
-                    {
-                        "packedCreated": True,
-                        "packedFileName": packed["fileName"],
-                        "packedRelativePath": packed_path.relative_to(temp_path).as_posix(),
-                        "packedSizeBytes": packed["size"],
-                    }
-                )
-                cached = cache_packed_download(packed_path, packed["fileName"])
-                packed_result["packedDownloadToken"] = cached["token"]
-                packed_result["packedDownloadPath"] = cached["path"]
-            except DeployError as error:
-                packed_result["packedError"] = str(error)
-                packed_result["packedErrorDetails"] = error.details
+            packed = create_packed_alpha_mp4(
+                input_path,
+                packed_path,
+                resolution,
+                frame_rate,
+                status["ffmpegPath"],
+                quality,
+                alpha_status,
+                stage,
+                overlay_video.filename,
+            )
+            packed_result.update(
+                {
+                    "packedCreated": True,
+                    "packedFileName": packed["fileName"],
+                    "packedRelativePath": packed_path.relative_to(temp_path).as_posix(),
+                    "packedSizeBytes": packed["size"],
+                }
+            )
+            cached = cache_packed_download(packed_path, packed["fileName"])
+            packed_result["packedDownloadToken"] = cached["token"]
+            packed_result["packedDownloadPath"] = cached["path"]
         else:
             packed_result["packedSkippedReason"] = alpha_status.get("error") or "Input video stream does not expose an alpha channel."
 
@@ -738,6 +810,7 @@ def optimize_overlay_video(form):
         return {
             "data": data,
             "fileName": output_name,
+            "contentType": content_type,
             "originalSize": input_path.stat().st_size,
             "optimizedSize": len(data),
             **packed_result,
@@ -756,7 +829,7 @@ def input_alpha_status(input_path, ffprobe_path):
         "-select_streams",
         "v:0",
         "-show_entries",
-        "stream=codec_name,pix_fmt",
+        "stream=codec_name,pix_fmt:stream_tags=alpha_mode",
         "-of",
         "json",
         str(input_path),
@@ -767,6 +840,7 @@ def input_alpha_status(input_path, ffprobe_path):
             "hasAlpha": False,
             "pixFmt": None,
             "codecName": None,
+            "alphaMode": None,
             "error": f"Could not verify alpha channel: {tail_output(result.stdout, result.stderr)}",
         }
 
@@ -777,16 +851,21 @@ def input_alpha_status(input_path, ffprobe_path):
             "hasAlpha": False,
             "pixFmt": None,
             "codecName": None,
+            "alphaMode": None,
             "error": f"Could not parse ffprobe alpha metadata: {error}",
         }
 
     streams = metadata.get("streams") or []
     stream = streams[0] if streams else {}
     pix_fmt = str(stream.get("pix_fmt") or "").lower()
+    codec_name = str(stream.get("codec_name") or "").lower()
+    tags = stream.get("tags") if isinstance(stream.get("tags"), dict) else {}
+    alpha_mode = str(tags.get("alpha_mode") or "").strip()
     return {
-        "hasAlpha": pix_fmt_has_alpha(pix_fmt),
+        "hasAlpha": pix_fmt_has_alpha(pix_fmt) or (codec_name in {"vp8", "vp9"} and alpha_mode == "1"),
         "pixFmt": pix_fmt or None,
-        "codecName": stream.get("codec_name"),
+        "codecName": codec_name or None,
+        "alphaMode": alpha_mode or None,
     }
 
 
@@ -798,7 +877,17 @@ def pix_fmt_has_alpha(pix_fmt):
     )
 
 
-def create_packed_alpha_mp4(input_path, output_path, resolution, frame_rate, ffmpeg_path, quality="balanced"):
+def create_packed_alpha_mp4(
+    input_path,
+    output_path,
+    resolution,
+    frame_rate,
+    ffmpeg_path,
+    quality="balanced",
+    alpha_status=None,
+    stage="overlay",
+    file_name="",
+):
     crf_by_quality = {
         "small": "32",
         "balanced": "26",
@@ -811,9 +900,11 @@ def create_packed_alpha_mp4(input_path, output_path, resolution, frame_rate, ffm
         f"[alpha_src]alphaextract,{scale_filter},format=gray[alpha];"
         "[color][alpha]vstack=inputs=2,format=yuv420p[packed]"
     )
+    decoder_args = packed_alpha_decoder_args(alpha_status)
     command = [
         ffmpeg_path,
         "-y",
+        *decoder_args,
         "-i",
         str(input_path),
         "-an",
@@ -838,7 +929,12 @@ def create_packed_alpha_mp4(input_path, output_path, resolution, frame_rate, ffm
         raise DeployError(
             "FFmpeg packed alpha conversion failed.",
             status=500,
-            details={"stderr": tail_output(result.stdout, result.stderr), "returncode": result.returncode},
+            details={
+                "stage": stage,
+                "fileName": file_name,
+                "stderr": tail_output(result.stdout, result.stderr),
+                "returncode": result.returncode,
+            },
         )
     if not output_path.exists() or output_path.stat().st_size <= 0:
         raise DeployError("FFmpeg did not create a packed alpha MP4.", status=500)
@@ -848,6 +944,19 @@ def create_packed_alpha_mp4(input_path, output_path, resolution, frame_rate, ffm
         "size": output_path.stat().st_size,
         "command": command,
     }
+
+
+def packed_alpha_decoder_args(alpha_status):
+    status = alpha_status if isinstance(alpha_status, dict) else {}
+    codec_name = str(status.get("codecName") or "").lower()
+    alpha_mode = str(status.get("alphaMode") or "")
+    if alpha_mode != "1":
+        return []
+    if codec_name == "vp9":
+        return ["-c:v", "libvpx-vp9"]
+    if codec_name == "vp8":
+        return ["-c:v", "libvpx"]
+    return []
 
 
 def optimizer_choice(value, allowed, label):
@@ -864,6 +973,13 @@ def optimizer_stage(value):
     return text
 
 
+def optimizer_background_mode(value):
+    text = str(value or "auto").strip().lower()
+    if text not in {"auto", "transparent", "opaque"}:
+        return "auto"
+    return text
+
+
 def write_temp_upload(field, path):
     with path.open("wb") as handle:
         while True:
@@ -873,7 +989,449 @@ def write_temp_upload(field, path):
             handle.write(chunk)
 
 
+def required_r2_config():
+    missing = [name for name in R2_ENV_VARS if not os.environ.get(name)]
+    if missing:
+        raise DeployError(
+            "Cloudflare R2 configuration is incomplete.",
+            status=409,
+            details={
+                "missingEnvVars": missing,
+                "storageMode": "Cloudflare R2 - Production",
+            },
+        )
+
+    return {
+        "accountId": os.environ["R2_ACCOUNT_ID"],
+        "accessKeyId": os.environ["R2_ACCESS_KEY_ID"],
+        "secretAccessKey": os.environ["R2_SECRET_ACCESS_KEY"],
+        "bucketName": os.environ["R2_BUCKET_NAME"],
+        "publicBaseUrl": os.environ["R2_PUBLIC_BASE_URL"].rstrip("/"),
+    }
+
+
+def create_r2_client(config):
+    try:
+        import boto3
+        from botocore.exceptions import ClientError
+    except ImportError as error:
+        raise DeployError(
+            "boto3 is required for Cloudflare R2 production storage.",
+            status=500,
+            details={
+                "dependency": "boto3",
+                "installCommand": "python -m pip install -r requirements.txt",
+            },
+        ) from error
+
+    endpoint_url = f"https://{config['accountId']}.r2.cloudflarestorage.com"
+    client = boto3.client(
+        "s3",
+        endpoint_url=endpoint_url,
+        aws_access_key_id=config["accessKeyId"],
+        aws_secret_access_key=config["secretAccessKey"],
+        region_name="auto",
+    )
+    return client, ClientError
+
+
+def content_hash(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def r2_key_for_overlay(target_id, role, path):
+    suffix = path.suffix.lower()
+    if suffix not in R2_CONTENT_TYPES:
+        raise DeployError(
+            "Production overlays must be optimized WebM or MP4 files before upload.",
+            details={"filename": path.name, "extension": suffix},
+        )
+    digest = content_hash(path)
+    return f"overlays/{target_id}/pose-01/{role}-{digest}{suffix}", digest
+
+
+def write_upload_to_transaction(field, transaction_dir, role, expected_extensions):
+    source_ext = overlay_extension(field.filename)
+    if source_ext not in expected_extensions:
+        raise DeployError(
+            "Overlay file is not in the required production format.",
+            details={
+                "fileName": field.filename,
+                "expectedExtensions": sorted(expected_extensions),
+            },
+        )
+    output_path = transaction_dir / f"{role}{source_ext}"
+    write_temp_upload(field, output_path)
+    if not output_path.exists() or output_path.stat().st_size <= 0:
+        raise DeployError("Uploaded overlay file is empty.", details={"fileName": field.filename})
+    return output_path
+
+
+def r2_head_object(client, client_error, bucket_name, key):
+    try:
+        return client.head_object(Bucket=bucket_name, Key=key)
+    except client_error as error:
+        code = str(error.response.get("Error", {}).get("Code", ""))
+        if code in {"404", "NoSuchKey", "NotFound"}:
+            return None
+        raise DeployError(
+            "Cloudflare R2 HEAD request failed.",
+            status=502,
+            details={"objectKey": key, "code": code or "unknown"},
+        ) from error
+
+
+def verify_r2_object(client, client_error, bucket_name, key, expected_size, expected_content_type=None):
+    head = r2_head_object(client, client_error, bucket_name, key)
+    if not head:
+        raise DeployError(
+            "Cloudflare R2 object verification failed.",
+            status=502,
+            details={"objectKey": key, "reason": "missing"},
+        )
+    actual_size = int(head.get("ContentLength") or 0)
+    if actual_size != int(expected_size):
+        raise DeployError(
+            "Cloudflare R2 object verification failed.",
+            status=502,
+            details={"objectKey": key, "expectedSize": expected_size, "actualSize": actual_size},
+        )
+    if expected_content_type and str(head.get("ContentType") or "").split(";", 1)[0] != expected_content_type:
+        raise DeployError(
+            "Cloudflare R2 object verification failed.",
+            status=502,
+            details={
+                "objectKey": key,
+                "expectedContentType": expected_content_type,
+                "actualContentType": head.get("ContentType"),
+            },
+        )
+    actual_cache_control = str(head.get("CacheControl") or "")
+    if actual_cache_control != R2_CACHE_CONTROL:
+        raise DeployError(
+            "Cloudflare R2 object verification failed.",
+            status=502,
+            details={
+                "objectKey": key,
+                "expectedCacheControl": R2_CACHE_CONTROL,
+                "actualCacheControl": actual_cache_control,
+            },
+        )
+    return head
+
+
+def upload_overlay_to_r2(client, client_error, config, target_id, role, path):
+    key, digest = r2_key_for_overlay(target_id, role, path)
+    size = path.stat().st_size
+    content_type = R2_CONTENT_TYPES[path.suffix.lower()]
+    bucket_name = config["bucketName"]
+    existing = r2_head_object(client, client_error, bucket_name, key)
+    created = False
+
+    if existing:
+        actual_size = int(existing.get("ContentLength") or 0)
+        if actual_size != size:
+            raise DeployError(
+                "Existing Cloudflare R2 object does not match the local content hash payload.",
+                status=409,
+                details={"objectKey": key, "expectedSize": size, "actualSize": actual_size},
+            )
+        existing_type = str(existing.get("ContentType") or "").split(";", 1)[0]
+        if existing_type != content_type:
+            raise DeployError(
+                "Existing Cloudflare R2 object metadata does not match the production overlay.",
+                status=409,
+                details={
+                    "objectKey": key,
+                    "expectedContentType": content_type,
+                    "actualContentType": existing.get("ContentType"),
+                },
+            )
+        existing_cache_control = str(existing.get("CacheControl") or "")
+        if existing_cache_control != R2_CACHE_CONTROL:
+            raise DeployError(
+                "Existing Cloudflare R2 object cache metadata does not match the production policy.",
+                status=409,
+                details={
+                    "objectKey": key,
+                    "expectedCacheControl": R2_CACHE_CONTROL,
+                    "actualCacheControl": existing_cache_control,
+                },
+            )
+    else:
+        try:
+            client.upload_file(
+                str(path),
+                bucket_name,
+                key,
+                ExtraArgs={
+                    "ContentType": content_type,
+                    "CacheControl": R2_CACHE_CONTROL,
+                },
+            )
+        except Exception as error:
+            raise DeployError(
+                "Cloudflare R2 upload failed.",
+                status=502,
+                details={"objectKey": key},
+            ) from error
+        created = True
+
+    verify_r2_object(client, client_error, bucket_name, key, size, content_type)
+    return {
+        "role": role,
+        "key": key,
+        "url": f"{config['publicBaseUrl']}/{key}",
+        "size": size,
+        "contentHash": digest,
+        "contentType": content_type,
+        "created": created,
+    }
+
+
+def delete_new_r2_objects(client, config, uploaded_objects):
+    deleted = []
+    for item in uploaded_objects:
+        if not item.get("created"):
+            continue
+        key = item["key"]
+        try:
+            client.delete_object(Bucket=config["bucketName"], Key=key)
+            deleted.append(key)
+        except Exception:
+            pass
+    return deleted
+
+
+def create_recovery_dir(transaction_dir, manifest):
+    CREATOR_RECOVERY_DIR.mkdir(parents=True, exist_ok=True)
+    recovery_dir = CREATOR_RECOVERY_DIR / f"{utc_now().replace(':', '').replace('-', '').replace('Z', 'Z')}-{secrets.token_hex(4)}"
+    shutil.move(str(transaction_dir), str(recovery_dir))
+    manifest_path = recovery_dir / "recovery-manifest.json"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return recovery_dir
+
+
+def pending_recovery_dirs():
+    if not CREATOR_RECOVERY_DIR.exists():
+        return []
+    pending = []
+    for path in CREATOR_RECOVERY_DIR.iterdir():
+        if not path.is_dir():
+            continue
+        if (path / PENDING_R2_DELETE_FILE).exists():
+            continue
+        manifest_path = path / "recovery-manifest.json"
+        if not manifest_path.exists():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if manifest.get("cleanupAfterPush"):
+            pending.append(path)
+    return pending
+
+
+def cleanup_pending_recoveries():
+    cleaned = []
+    for path in pending_recovery_dirs():
+        shutil.rmtree(path, ignore_errors=True)
+        cleaned.append(str(path))
+    return cleaned
+
+
+def pending_r2_delete_manifest_paths():
+    if not CREATOR_RECOVERY_DIR.exists():
+        return []
+    manifests = []
+    for path in CREATOR_RECOVERY_DIR.iterdir():
+        if not path.is_dir():
+            continue
+        manifest_path = path / PENDING_R2_DELETE_FILE
+        if manifest_path.exists():
+            manifests.append(manifest_path)
+    return manifests
+
+
+def pending_r2_delete_recovery_paths():
+    return [str(path.parent) for path in pending_r2_delete_manifest_paths()]
+
+
+def r2_key_from_public_url(url, config):
+    public_base = config["publicBaseUrl"].rstrip("/")
+    if not isinstance(url, str) or not url.startswith(f"{public_base}/"):
+        return None
+    return url[len(public_base) + 1 :]
+
+
+def validate_r2_delete_key(key):
+    text = str(key or "").strip()
+    if not text:
+        raise DeployError("R2 delete key is empty.")
+    path = Path(text)
+    if path.is_absolute() or ".." in path.parts or "\\" in text:
+        raise DeployError("R2 delete key is invalid.", details={"objectKey": text})
+    if not text.startswith(ALLOWED_R2_DELETE_PREFIXES):
+        raise DeployError(
+            "R2 delete key is outside the allowed overlay prefix.",
+            details={"objectKey": text, "allowedPrefixes": list(ALLOWED_R2_DELETE_PREFIXES)},
+        )
+    return text
+
+
+def r2_delete_keys_for_target(target, config):
+    keys = []
+    seen = set()
+    for key_name in ("overlayPath", "overlayPackedPath", "overlayLoopPath", "overlayLoopPackedPath"):
+        value = target.get(key_name)
+        if not value or not is_remote_url(value):
+            continue
+        object_key = r2_key_from_public_url(value, config)
+        if not object_key:
+            continue
+        object_key = validate_r2_delete_key(object_key)
+        if object_key in seen:
+            continue
+        seen.add(object_key)
+        keys.append({"field": key_name, "objectKey": object_key, "url": value})
+    return keys
+
+
+def create_pending_r2_delete_manifest(target, r2_objects, moved_files):
+    if not r2_objects:
+        return None
+    CREATOR_RECOVERY_DIR.mkdir(parents=True, exist_ok=True)
+    transaction_id = f"delete-{target['id']}-{utc_now().replace(':', '').replace('-', '').replace('Z', 'Z')}-{secrets.token_hex(4)}"
+    recovery_dir = CREATOR_RECOVERY_DIR / transaction_id
+    recovery_dir.mkdir(parents=True, exist_ok=False)
+    manifest = {
+        "type": "pending-r2-delete",
+        "targetId": target["id"],
+        "targetName": target.get("name") or target["id"],
+        "createdAt": utc_now(),
+        "deployCommitState": {
+            "status": "pending-push",
+            "commitSha": "",
+            "pushedAt": "",
+        },
+        "r2Objects": r2_objects,
+        "movedFiles": moved_files,
+        "retrySteps": [
+            "Run Save & Deploy Library after resolving deploy issues.",
+            "Keep this recovery folder until R2 cleanup succeeds.",
+            "Do not delete R2 objects manually unless each exact object key is verified.",
+        ],
+    }
+    manifest_path = recovery_dir / PENDING_R2_DELETE_FILE
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return recovery_dir
+
+
+def cleanup_pending_r2_deletes(commit_sha):
+    manifests = pending_r2_delete_manifest_paths()
+    if not manifests:
+        return {
+            "cleanupComplete": True,
+            "deletedObjectKeys": [],
+            "cleanedRecoveryPaths": [],
+            "pendingRecoveryPaths": [],
+            "errors": [],
+        }
+
+    config = required_r2_config()
+    client, client_error = create_r2_client(config)
+    deleted_keys = []
+    cleaned_paths = []
+    pending_paths = []
+    errors = []
+    current_library = read_library_js()
+
+    for manifest_path in manifests:
+        recovery_dir = manifest_path.parent
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            target_id = str(manifest.get("targetId") or "")
+            if target_id and find_target(current_library, target_id):
+                raise DeployError(
+                    "Refusing R2 delete because the target still exists in src/ar-library.js.",
+                    status=409,
+                    details={"targetId": target_id},
+                )
+            r2_objects = manifest.get("r2Objects") or []
+            for item in r2_objects:
+                object_key = validate_r2_delete_key(item.get("objectKey"))
+                try:
+                    client.delete_object(Bucket=config["bucketName"], Key=object_key)
+                    deleted_keys.append(object_key)
+                except client_error as error:
+                    code = str(error.response.get("Error", {}).get("Code", ""))
+                    if code not in {"404", "NoSuchKey", "NotFound"}:
+                        raise DeployError(
+                            "Cloudflare R2 delete failed.",
+                            status=502,
+                            details={"objectKey": object_key, "code": code or "unknown"},
+                        ) from error
+            manifest["deployCommitState"] = {
+                "status": "pushed-cleaned",
+                "commitSha": commit_sha,
+                "pushedAt": utc_now(),
+            }
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            shutil.rmtree(recovery_dir, ignore_errors=False)
+            cleaned_paths.append(str(recovery_dir))
+        except Exception as error:
+            pending_paths.append(str(recovery_dir))
+            errors.append({"recoveryPath": str(recovery_dir), "error": str(error)})
+
+    return {
+        "cleanupComplete": not pending_paths,
+        "deletedObjectKeys": deleted_keys,
+        "cleanedRecoveryPaths": cleaned_paths,
+        "pendingRecoveryPaths": pending_paths,
+        "errors": errors,
+    }
+
+
+def verify_remote_r2_url(client, client_error, config, url):
+    key = r2_key_from_public_url(url, config)
+    if not key:
+        raise DeployError(
+            "Remote overlay URL is outside the configured R2 public base.",
+            details={"url": url},
+        )
+    head = r2_head_object(client, client_error, config["bucketName"], key)
+    if not head:
+        raise DeployError(
+            "Remote overlay object is missing in Cloudflare R2.",
+            details={"url": url, "objectKey": key},
+        )
+    if int(head.get("ContentLength") or 0) <= 0:
+        raise DeployError(
+            "Remote overlay object is empty in Cloudflare R2.",
+            details={"url": url, "objectKey": key},
+        )
+    return {"url": url, "key": key, "size": int(head.get("ContentLength") or 0)}
+
+
+def is_remote_url(value):
+    return isinstance(value, str) and re.match(r"^https?://", value)
+
+
+def is_local_asset_path(value):
+    return isinstance(value, str) and value.startswith("./")
+
+
 def save_library_target(form):
+    r2_config = required_r2_config()
+    r2_client, r2_client_error = create_r2_client(r2_config)
     library = parse_library_json(required_form_text(form, "library"))
     target_id = required_form_text(form, "targetId")
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,48}", target_id):
@@ -893,26 +1451,9 @@ def save_library_target(form):
     target_ext = image_extension(target_image.filename)
     overlay_ext = overlay_extension(overlay_video.filename)
     overlay_loop_ext = overlay_extension(overlay_loop_video.filename) if overlay_loop_video is not None else None
-    packed_path = target.get("overlayPackedPath")
-    loop_path = target.get("overlayLoopPath")
-    loop_packed_path = target.get("overlayLoopPackedPath")
 
     if target.get("imagePath") != f"./assets/targets/{target_id}{target_ext}":
         raise DeployError("library imagePath does not match targetId.", details={"imagePath": target.get("imagePath")})
-    if target.get("overlayPath") != f"./assets/overlays/{target_id}{overlay_ext}":
-        raise DeployError("library overlayPath does not match targetId.", details={"overlayPath": target.get("overlayPath")})
-    if overlay_loop_video is not None:
-        expected_loop_path = f"./assets/overlays/{target_id}-loop{overlay_loop_ext}"
-        if loop_path != expected_loop_path:
-            raise DeployError(
-                "library overlayLoopPath does not match targetId.",
-                details={"overlayLoopPath": loop_path, "expected": expected_loop_path},
-            )
-    elif loop_path:
-        raise DeployError(
-            "Library target expects a loop overlay, but overlayLoopVideo was not uploaded.",
-            details={"overlayLoopPath": loop_path},
-        )
 
     if overlay_packed_video is not None:
         packed_ext = overlay_extension(overlay_packed_video.filename)
@@ -921,20 +1462,6 @@ def save_library_target(form):
                 "Packed alpha overlay must be an MP4.",
                 details={"filename": overlay_packed_video.filename},
             )
-        expected_packed_path = f"./assets/overlays/{target_id}-packed.mp4"
-        if packed_path != expected_packed_path:
-            raise DeployError(
-                "library overlayPackedPath does not match targetId.",
-                details={
-                    "overlayPackedPath": packed_path,
-                    "expected": expected_packed_path,
-                },
-            )
-    elif packed_path:
-        raise DeployError(
-            "Library target expects a packed overlay, but overlayPackedVideo was not uploaded.",
-            details={"overlayPackedPath": packed_path},
-        )
     if overlay_loop_packed_video is not None:
         loop_packed_ext = overlay_extension(overlay_loop_packed_video.filename)
         if loop_packed_ext != ".mp4":
@@ -942,52 +1469,133 @@ def save_library_target(form):
                 "Packed alpha loop overlay must be an MP4.",
                 details={"filename": overlay_loop_packed_video.filename},
             )
-        expected_loop_packed_path = f"./assets/overlays/{target_id}-loop-packed.mp4"
-        if loop_packed_path != expected_loop_packed_path:
-            raise DeployError(
-                "library overlayLoopPackedPath does not match targetId.",
-                details={
-                    "overlayLoopPackedPath": loop_packed_path,
-                    "expected": expected_loop_packed_path,
-                },
-            )
-    elif loop_packed_path:
+
+    if overlay_loop_video is None and target.get("overlayLoopPath"):
+        raise DeployError(
+            "Library target expects a loop overlay, but overlayLoopVideo was not uploaded.",
+            details={"overlayLoopPath": target.get("overlayLoopPath")},
+        )
+    if overlay_packed_video is None and target.get("overlayPackedPath"):
+        raise DeployError(
+            "Library target expects a packed overlay, but overlayPackedVideo was not uploaded.",
+            details={"overlayPackedPath": target.get("overlayPackedPath")},
+        )
+    if overlay_loop_packed_video is None and target.get("overlayLoopPackedPath"):
         raise DeployError(
             "Library target expects a packed loop overlay, but overlayLoopPackedVideo was not uploaded.",
-            details={"overlayLoopPackedPath": loop_packed_path},
+            details={"overlayLoopPackedPath": target.get("overlayLoopPackedPath")},
         )
 
-    normalized_library = normalize_library(library)
+    transaction_dir = Path(tempfile.mkdtemp(prefix="print-ar-creator-"))
+    uploaded_objects = []
+    recovery_dir = None
+    repo_updated = False
 
-    TARGETS_DIR.mkdir(parents=True, exist_ok=True)
-    OVERLAYS_DIR.mkdir(parents=True, exist_ok=True)
-    write_uploaded_file(target_image, TARGETS_DIR / f"{target_id}{target_ext}")
-    write_uploaded_file(overlay_video, OVERLAYS_DIR / f"{target_id}{overlay_ext}")
-    if overlay_loop_video is not None:
-        write_uploaded_file(overlay_loop_video, OVERLAYS_DIR / f"{target_id}-loop{overlay_loop_ext}")
-    if overlay_packed_video is not None:
-        write_uploaded_file(
-            overlay_packed_video,
-            OVERLAYS_DIR / f"{target_id}-packed.mp4",
-        )
-    if overlay_loop_packed_video is not None:
-        write_uploaded_file(
-            overlay_loop_packed_video,
-            OVERLAYS_DIR / f"{target_id}-loop-packed.mp4",
-        )
-    write_uploaded_file(targets_mind, TARGETS_MIND_PATH)
-    write_library_js(normalized_library)
+    try:
+        overlay_files = []
+        if overlay_loop_video is not None:
+            overlay_files.append(("overlayPath", "intro", write_upload_to_transaction(overlay_video, transaction_dir, "intro", {".webm", ".mp4"})))
+            overlay_files.append(("overlayLoopPath", "loop", write_upload_to_transaction(overlay_loop_video, transaction_dir, "loop", {".webm", ".mp4"})))
+        else:
+            overlay_files.append(("overlayPath", "main", write_upload_to_transaction(overlay_video, transaction_dir, "main", {".webm", ".mp4"})))
+
+        if overlay_packed_video is not None:
+            packed_role = "intro-packed" if overlay_loop_video is not None else "main-packed"
+            overlay_files.append(("overlayPackedPath", packed_role, write_upload_to_transaction(overlay_packed_video, transaction_dir, packed_role, {".mp4"})))
+        if overlay_loop_packed_video is not None:
+            overlay_files.append(("overlayLoopPackedPath", "loop-packed", write_upload_to_transaction(overlay_loop_packed_video, transaction_dir, "loop-packed", {".mp4"})))
+
+        if os.environ.get("CREATOR_FORCE_R2_UPLOAD_FAILURE") == "1":
+            raise DeployError(
+                "Forced R2 upload failure for manual testing.",
+                status=500,
+                details={"testFlag": "CREATOR_FORCE_R2_UPLOAD_FAILURE"},
+            )
+
+        for key_name, role, path in overlay_files:
+            uploaded = upload_overlay_to_r2(r2_client, r2_client_error, r2_config, target_id, role, path)
+            uploaded_objects.append(uploaded)
+            target[key_name] = uploaded["url"]
+
+        target["updatedAt"] = utc_now()
+        normalized_library = normalize_library(library)
+
+        if os.environ.get("CREATOR_FORCE_AFTER_R2_VERIFY_FAILURE") == "1":
+            raise DeployError(
+                "Forced failure after R2 verification for manual testing.",
+                status=500,
+                details={"testFlag": "CREATOR_FORCE_AFTER_R2_VERIFY_FAILURE"},
+            )
+
+        TARGETS_DIR.mkdir(parents=True, exist_ok=True)
+        write_uploaded_file(target_image, TARGETS_DIR / f"{target_id}{target_ext}")
+        atomic_write_library_and_targets(normalized_library, targets_mind)
+        repo_updated = True
+
+        recovery_manifest = {
+            "status": "library-updated",
+            "storageMode": "Cloudflare R2 - Production",
+            "targetId": target_id,
+            "createdAt": utc_now(),
+            "cleanupAfterPush": True,
+            "r2Objects": [
+                {
+                    "role": item["role"],
+                    "key": item["key"],
+                    "url": item["url"],
+                    "size": item["size"],
+                    "contentHash": item["contentHash"],
+                    "created": item["created"],
+                }
+                for item in uploaded_objects
+            ],
+            "repoFiles": [
+                f"assets/targets/{target_id}{target_ext}",
+                "assets/targets.mind",
+                "src/ar-library.js",
+            ],
+            "retrySteps": [
+                "Confirm the library diff still points at these R2 URLs.",
+                "Run Save & Deploy Library again after fixing the failure.",
+                "Do not delete this recovery folder until a push succeeds.",
+            ],
+        }
+        recovery_dir = create_recovery_dir(transaction_dir, recovery_manifest)
+        transaction_dir = None
+    except Exception as error:
+        if not repo_updated:
+            delete_new_r2_objects(r2_client, r2_config, uploaded_objects)
+        if transaction_dir and transaction_dir.exists():
+            manifest = {
+                "status": "failed",
+                "storageMode": "Cloudflare R2 - Production",
+                "targetId": target_id,
+                "createdAt": utc_now(),
+                "cleanupAfterPush": False,
+                "error": str(error),
+                "uploadedObjects": [
+                    {"role": item["role"], "key": item["key"], "created": item["created"]}
+                    for item in uploaded_objects
+                ],
+            }
+            recovery_dir = create_recovery_dir(transaction_dir, manifest)
+            transaction_dir = None
+            if isinstance(error, DeployError):
+                error.details["recoveryPath"] = str(recovery_dir)
+            else:
+                raise DeployError(
+                    "Cloudflare R2 production save failed.",
+                    status=500,
+                    details={"recoveryPath": str(recovery_dir)},
+                ) from error
+        raise
+    finally:
+        if transaction_dir and transaction_dir.exists():
+            shutil.rmtree(transaction_dir, ignore_errors=True)
 
     written_files = [
         f"assets/targets/{target_id}{target_ext}",
-        f"assets/overlays/{target_id}{overlay_ext}",
     ]
-    if overlay_loop_video is not None:
-        written_files.append(f"assets/overlays/{target_id}-loop{overlay_loop_ext}")
-    if overlay_packed_video is not None:
-        written_files.append(f"assets/overlays/{target_id}-packed.mp4")
-    if overlay_loop_packed_video is not None:
-        written_files.append(f"assets/overlays/{target_id}-loop-packed.mp4")
     written_files.extend([
         "assets/targets.mind",
         "src/ar-library.js",
@@ -998,6 +1606,24 @@ def save_library_target(form):
         "targetId": target_id,
         "activeTargets": len([target for target in normalized_library["targets"] if target.get("enabled")]),
         "writtenFiles": written_files,
+        "storageMode": "Cloudflare R2 - Production",
+        "r2Status": {
+            "configured": True,
+            "uploadComplete": True,
+            "verifyComplete": True,
+            "objects": [
+                {
+                    "role": item["role"],
+                    "key": item["key"],
+                    "url": item["url"],
+                    "size": item["size"],
+                    "created": item["created"],
+                }
+                for item in uploaded_objects
+            ],
+            "recoveryPath": str(recovery_dir) if recovery_dir else "",
+            "cleanupComplete": False,
+        },
         "library": normalized_library,
     }
 
@@ -1030,14 +1656,31 @@ def delete_library_target(form):
     if find_target(library, target_id):
         raise DeployError("Deleted target is still present in the next library payload.", details={"targetId": target_id})
 
+    has_remote_overlay = any(
+        is_remote_url(current_target.get(key))
+        for key in ("overlayPath", "overlayPackedPath", "overlayLoopPath", "overlayLoopPackedPath")
+    )
+    r2_delete_objects = []
+    if has_remote_overlay:
+        r2_config = required_r2_config()
+        r2_delete_objects = r2_delete_keys_for_target(current_target, r2_config)
+
     normalized_library = normalize_library(library)
     active_targets = [target for target in normalized_library["targets"] if target.get("enabled")]
     if not active_targets:
         raise DeployError("Cannot delete the last enabled target in this prototype.")
 
     moved_files = move_target_assets_to_deleted(current_target)
-    write_uploaded_file(targets_mind, TARGETS_MIND_PATH)
-    write_library_js(normalized_library)
+    recovery_dir = None
+    try:
+        if r2_delete_objects:
+            recovery_dir = create_pending_r2_delete_manifest(current_target, r2_delete_objects, moved_files)
+        atomic_write_library_and_targets(normalized_library, targets_mind)
+    except Exception:
+        if recovery_dir and recovery_dir.exists():
+            shutil.rmtree(recovery_dir, ignore_errors=True)
+        restore_moved_target_assets(current_target, moved_files)
+        raise
 
     return {
         "changed": True,
@@ -1048,6 +1691,12 @@ def delete_library_target(form):
             "src/ar-library.js",
         ],
         "movedFiles": moved_files,
+        "r2DeletePending": {
+            "pending": bool(r2_delete_objects),
+            "objectKeys": [item["objectKey"] for item in r2_delete_objects],
+            "recoveryPath": str(recovery_dir) if recovery_dir else "",
+            "cleanupAfterPush": bool(r2_delete_objects),
+        },
         "library": normalized_library,
     }
 
@@ -1181,6 +1830,8 @@ def save_library_overlay(payload):
 
 
 def prepare_library_deploy(payload):
+    r2_config = required_r2_config()
+    r2_client, r2_client_error = create_r2_client(r2_config)
     library = read_library_js()
     if payload.get("baseLibraryVersion") != library.get("version"):
         raise DeployError(
@@ -1197,9 +1848,10 @@ def prepare_library_deploy(payload):
     normalized_library = normalize_library(library)
     errors = []
     warnings = []
-    files_to_deploy = ["src/ar-library.js", "assets/targets.mind"]
+    files_to_deploy = [DEPLOY_VERSION_REPO_PATH, "src/ar-library.js", "assets/targets.mind"]
     referenced_targets = set()
     referenced_overlays = set()
+    remote_overlays = []
     latest_enabled_image_mtime = None
     enabled_targets = [target for target in normalized_library["targets"] if target.get("enabled")]
 
@@ -1223,12 +1875,22 @@ def prepare_library_deploy(payload):
         for key in ("overlayPath", "overlayLoopPath", "overlayPackedPath", "overlayLoopPackedPath"):
             if not target.get(key):
                 continue
-            overlay_repo_path = target[key][2:]
+            overlay_value = target[key]
+            if is_remote_url(overlay_value):
+                try:
+                    remote_overlays.append(verify_remote_r2_url(r2_client, r2_client_error, r2_config, overlay_value))
+                except DeployError as error:
+                    errors.append(f"{target['id']} {key} R2 verify failed: {error}")
+                continue
+            if not is_local_asset_path(overlay_value):
+                errors.append(f"{target['id']} {key} is not a local asset path or remote URL: {overlay_value}")
+                continue
+            overlay_repo_path = overlay_value[2:]
             overlay_path = ROOT / overlay_repo_path
             referenced_overlays.add(normalize_repo_path(overlay_repo_path))
             files_to_deploy.append(normalize_repo_path(overlay_repo_path))
             if not overlay_path.exists():
-                errors.append(f"{target['id']} {key} file is missing: {target[key]}")
+                errors.append(f"{target['id']} {key} file is missing: {overlay_value}")
 
     if actual_indexes != expected_indexes:
         errors.append(f"Enabled targetIndex values must be {expected_indexes}, got {actual_indexes}.")
@@ -1237,8 +1899,18 @@ def prepare_library_deploy(payload):
         errors.append("Enabled targets exceed maxActiveTargets.")
 
     if latest_enabled_image_mtime is not None and TARGETS_MIND_PATH.exists() and TARGETS_MIND_PATH.stat().st_size > 0:
-        if TARGETS_MIND_PATH.stat().st_mtime < latest_enabled_image_mtime:
-            errors.append("assets/targets.mind is older than an enabled target image. Recompile active targets before deploy.")
+        targets_mind_mtime = TARGETS_MIND_PATH.stat().st_mtime
+        stale_seconds = latest_enabled_image_mtime - targets_mind_mtime
+        if stale_seconds > 120:
+            errors.append(
+                "assets/targets.mind is older than an enabled target image by "
+                f"{round(stale_seconds)} seconds. Recompile active targets before deploy."
+            )
+        elif stale_seconds > 0:
+            warnings.append(
+                "assets/targets.mind is slightly older than an enabled target image "
+                f"by {round(stale_seconds)} seconds. This may be caused by filesystem sync timing."
+            )
 
     warnings.extend(orphan_asset_warnings(TARGETS_DIR, referenced_targets, "target image"))
     warnings.extend(orphan_asset_warnings(OVERLAYS_DIR, referenced_overlays, "overlay"))
@@ -1254,6 +1926,16 @@ def prepare_library_deploy(payload):
         "filesToDeploy": files_to_deploy,
         "warnings": warnings,
         "unrelatedChanges": unrelated_changes,
+        "storageMode": "Cloudflare R2 - Production",
+        "r2Status": {
+            "configured": True,
+            "verifyComplete": not errors,
+            "remoteOverlayCount": len(remote_overlays),
+            "remoteOverlays": remote_overlays,
+            "recoveryPaths": [str(path) for path in pending_recovery_dirs()],
+            "pendingR2DeleteRecoveryPaths": pending_r2_delete_recovery_paths(),
+            "cleanupComplete": False,
+        },
         "librarySummary": {
             "totalTargets": len(normalized_library["targets"]),
             "enabledTargets": len(enabled_targets),
@@ -1272,7 +1954,18 @@ def deploy_library(payload):
     try:
         validation = prepare_library_deploy(payload)
         if not validation["ready"]:
-            raise DeployError("validation failed.", status=409, details={"errors": validation["errors"], "warnings": validation["warnings"]})
+            raise DeployError(
+                "validation failed.",
+                status=409,
+                details={
+                    "errors": validation["errors"],
+                    "warnings": validation["warnings"],
+                    "recoveryPaths": (
+                        validation.get("r2Status", {}).get("recoveryPaths", [])
+                        + validation.get("r2Status", {}).get("pendingR2DeleteRecoveryPaths", [])
+                    ),
+                },
+            )
 
         files_to_deploy = validation["filesToDeploy"]
         confirmed_files = payload.get("confirmedFiles")
@@ -1291,15 +1984,39 @@ def deploy_library(payload):
         unstage_all()
         ensure_library_git_ready()
 
-        if not deploy_set_has_changes(files_to_deploy):
+        if os.environ.get("CREATOR_FORCE_DEPLOY_FAILURE_AFTER_UPLOAD") == "1":
+            raise DeployError(
+                "Forced deploy failure after R2 upload for manual testing.",
+                status=500,
+                details={
+                    "testFlag": "CREATOR_FORCE_DEPLOY_FAILURE_AFTER_UPLOAD",
+                    "recoveryPaths": [str(path) for path in pending_recovery_dirs()] + pending_r2_delete_recovery_paths(),
+                    "retrySteps": [
+                        "Unset CREATOR_FORCE_DEPLOY_FAILURE_AFTER_UPLOAD.",
+                        "Run Save & Deploy Library again.",
+                        "Keep recovery folders until push and R2 cleanup succeed.",
+                    ],
+                },
+            )
+
+        content_files_to_deploy = deploy_content_files(files_to_deploy)
+        if not deploy_set_has_changes(content_files_to_deploy):
+            r2_delete_cleanup = cleanup_pending_r2_deletes(run_git(["rev-parse", "HEAD"]).stdout.strip())
             return {
                 "deployed": False,
-                "changed": False,
-                "message": "Nothing new to deploy.",
+                "changed": bool(r2_delete_cleanup["deletedObjectKeys"]),
+                "message": "Nothing new to deploy." if r2_delete_cleanup["cleanupComplete"] else "Nothing new to deploy, but R2 cleanup is still pending.",
                 "filesDeployed": files_to_deploy,
                 "librarySummary": validation["librarySummary"],
+                "storageMode": "Cloudflare R2 - Production",
+                "r2Status": {
+                    **validation.get("r2Status", {}),
+                    "cleanupComplete": r2_delete_cleanup["cleanupComplete"],
+                    "r2DeleteCleanup": r2_delete_cleanup,
+                },
             }
 
+        write_deploy_version_js(next_deploy_version())
         run_git(["add", "--", *files_to_deploy])
         staged = staged_files()
         staged_set = set(staged)
@@ -1316,12 +2033,19 @@ def deploy_library(payload):
                 },
             )
         if not staged:
+            r2_delete_cleanup = cleanup_pending_r2_deletes(run_git(["rev-parse", "HEAD"]).stdout.strip())
             return {
                 "deployed": False,
-                "changed": False,
-                "message": "No library changes to deploy.",
+                "changed": bool(r2_delete_cleanup["deletedObjectKeys"]),
+                "message": "No library changes to deploy." if r2_delete_cleanup["cleanupComplete"] else "No library changes to deploy, but R2 cleanup is still pending.",
                 "filesDeployed": files_to_deploy,
                 "librarySummary": validation["librarySummary"],
+                "storageMode": "Cloudflare R2 - Production",
+                "r2Status": {
+                    **validation.get("r2Status", {}),
+                    "cleanupComplete": r2_delete_cleanup["cleanupComplete"],
+                    "r2DeleteCleanup": r2_delete_cleanup,
+                },
             }
 
         run_git(["commit", "-m", LIBRARY_DEPLOY_MESSAGE, "--", *files_to_deploy])
@@ -1334,9 +2058,20 @@ def deploy_library(payload):
             raise DeployError(
                 "Local commit created but push failed.",
                 status=500,
-                details={"commitSha": commit_sha, "pushError": error.details},
+                details={
+                    "commitSha": commit_sha,
+                    "pushError": error.details,
+                    "recoveryPaths": [str(path) for path in pending_recovery_dirs()] + pending_r2_delete_recovery_paths(),
+                    "retrySteps": [
+                        "Fix the git push issue.",
+                        "Run git push origin main or Save & Deploy Library again.",
+                        "Do not delete recovery folders until push and R2 cleanup succeed.",
+                    ],
+                },
             )
 
+        r2_delete_cleanup = cleanup_pending_r2_deletes(commit_sha)
+        cleaned_recoveries = cleanup_pending_recoveries()
         return {
             "deployed": True,
             "commitSha": commit_sha,
@@ -1345,7 +2080,14 @@ def deploy_library(payload):
             "remote": "origin/main",
             "filesDeployed": files_to_deploy,
             "librarySummary": validation["librarySummary"],
-            "message": "Library deployed successfully.",
+            "storageMode": "Cloudflare R2 - Production",
+            "r2Status": {
+                **validation.get("r2Status", {}),
+                "cleanupComplete": r2_delete_cleanup["cleanupComplete"],
+                "cleanedRecoveryPaths": cleaned_recoveries,
+                "r2DeleteCleanup": r2_delete_cleanup,
+            },
+            "message": "Library deployed successfully." if r2_delete_cleanup["cleanupComplete"] else "Library deployed, but R2 cleanup is still pending.",
         }
     except Exception:
         if files_to_deploy and not committed:
@@ -1357,7 +2099,7 @@ def deploy_library(payload):
 
 def validate_deploy_paths(paths):
     allowed_prefixes = ("assets/targets/", "assets/overlays/")
-    allowed_exact = {"src/ar-library.js", "assets/targets.mind"}
+    allowed_exact = {DEPLOY_VERSION_REPO_PATH, "src/ar-library.js", "assets/targets.mind"}
 
     for path in paths:
         repo_path = normalize_repo_path(path)
@@ -1372,6 +2114,17 @@ def validate_deploy_paths(paths):
             raise DeployError("Deploy path resolves outside the repository.", details={"path": path})
         if not resolved.exists():
             raise DeployError("Deploy path does not exist.", details={"path": path})
+
+
+def next_deploy_version():
+    return utc_now()
+
+
+def write_deploy_version_js(version):
+    DEPLOY_VERSION_PATH.write_text(
+        f"window.AR_DEPLOY_VERSION = {json.dumps(str(version), ensure_ascii=False)};\n",
+        encoding="utf-8",
+    )
 
 
 def ensure_library_git_ready():
@@ -1402,6 +2155,10 @@ def deploy_set_has_changes(paths):
         status=500,
         details={"stdout": result.stdout, "stderr": result.stderr, "returncode": result.returncode},
     )
+
+
+def deploy_content_files(paths):
+    return [path for path in paths if normalize_repo_path(path) != DEPLOY_VERSION_REPO_PATH]
 
 
 def unstage_files(paths):
@@ -1592,20 +2349,25 @@ def normalize_target(target):
         raise DeployError("Invalid target id.", details={"targetId": target_id})
 
     image_path = validate_asset_path(target.get("imagePath"), "assets/targets/", {".png", ".jpg", ".jpeg", ".webp"})
-    overlay_path = validate_asset_path(target.get("overlayPath"), "assets/overlays/", OVERLAY_EXTENSIONS)
+    overlay_path = validate_overlay_asset_or_url(target.get("overlayPath"), OVERLAY_EXTENSIONS)
     overlay_loop_path = None
     if target.get("overlayLoopPath"):
-        overlay_loop_path = validate_asset_path(target.get("overlayLoopPath"), "assets/overlays/", OVERLAY_EXTENSIONS)
+        overlay_loop_path = validate_overlay_asset_or_url(target.get("overlayLoopPath"), OVERLAY_EXTENSIONS)
     overlay = validate_overlay(target.get("overlay"), f"target {target_id} overlay")
 
     overlay_packed_path = None
     overlay_loop_packed_path = None
     overlay_mode = str(target.get("overlayMode") or "video").strip()
+    overlay_background_mode = str(target.get("overlayBackgroundMode") or "auto").strip()
+    if overlay_background_mode not in {"auto", "transparent", "opaque"}:
+        raise DeployError(
+            "Invalid overlayBackgroundMode.",
+            details={"overlayBackgroundMode": overlay_background_mode, "allowed": ["auto", "transparent", "opaque"]},
+        )
 
     if target.get("overlayPackedPath"):
-        overlay_packed_path = validate_asset_path(
+        overlay_packed_path = validate_overlay_asset_or_url(
             target.get("overlayPackedPath"),
-            "assets/overlays/",
             {".mp4"},
         )
         if overlay_mode not in {"auto-alpha", "packed-alpha"}:
@@ -1617,11 +2379,15 @@ def normalize_target(target):
                 },
             )
     else:
-        overlay_mode = "video"
+        if overlay_mode not in {"video", "opaque"}:
+            raise DeployError(
+                "Invalid overlayMode without packed alpha target.",
+                details={"overlayMode": overlay_mode, "allowed": ["opaque"]},
+            )
+        overlay_mode = "opaque" if overlay_mode == "opaque" else "video"
     if target.get("overlayLoopPackedPath"):
-        overlay_loop_packed_path = validate_asset_path(
+        overlay_loop_packed_path = validate_overlay_asset_or_url(
             target.get("overlayLoopPackedPath"),
-            "assets/overlays/",
             {".mp4"},
         )
         if not overlay_packed_path:
@@ -1642,6 +2408,7 @@ def normalize_target(target):
         "targetIndex": target.get("targetIndex"),
         "imagePath": image_path,
         "overlayPath": overlay_path,
+        "overlayBackgroundMode": overlay_background_mode,
         "overlayType": "video",
         "overlay": overlay_to_library(overlay),
         "video": normalize_video(target.get("video")),
@@ -1651,6 +2418,8 @@ def normalize_target(target):
     if overlay_packed_path:
         normalized["overlayPackedPath"] = overlay_packed_path
         normalized["overlayMode"] = overlay_mode
+    elif overlay_mode == "opaque":
+        normalized["overlayMode"] = "opaque"
     if overlay_loop_path:
         normalized["overlayLoopPath"] = overlay_loop_path
     if overlay_loop_packed_path:
@@ -1669,6 +2438,15 @@ def validate_asset_path(value, prefix, extensions):
     if path.suffix.lower() not in extensions:
         raise DeployError("Unsupported asset extension.", details={"path": value, "extensions": sorted(extensions)})
     return value
+
+
+def validate_overlay_asset_or_url(value, extensions):
+    if is_remote_url(value):
+        suffix = Path(value.split("?", 1)[0]).suffix.lower()
+        if suffix not in extensions:
+            raise DeployError("Unsupported remote overlay extension.", details={"path": value, "extensions": sorted(extensions)})
+        return value
+    return validate_asset_path(value, "assets/overlays/", extensions)
 
 
 def image_extension(filename):
@@ -1716,6 +2494,102 @@ def write_uploaded_file(field, path):
             handle.write(chunk)
 
 
+def atomic_write_uploaded_file(field, path):
+    resolved = path.resolve()
+    if ROOT.resolve() not in resolved.parents:
+        raise DeployError("Refusing to write outside repository.", details={"path": str(path)})
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    backup_path = resolved.with_name(f".{resolved.name}.backup-{secrets.token_hex(4)}")
+    temp_path = resolved.with_name(f".{resolved.name}.tmp-{secrets.token_hex(4)}")
+    had_original = resolved.exists()
+    try:
+        if had_original:
+            shutil.copy2(resolved, backup_path)
+        write_uploaded_file(field, temp_path)
+        if not temp_path.exists() or temp_path.stat().st_size <= 0:
+            raise DeployError("Temporary write produced an empty file.", details={"path": normalize_repo_path(resolved.relative_to(ROOT))})
+        shutil.move(str(temp_path), str(resolved))
+    except Exception:
+        if had_original and backup_path.exists():
+            shutil.copy2(backup_path, resolved)
+        elif not had_original and resolved.exists():
+            resolved.unlink()
+        raise
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+        if backup_path.exists():
+            backup_path.unlink()
+
+
+def atomic_write_library_js(library):
+    backup_path = LIBRARY_PATH.with_name(f".{LIBRARY_PATH.name}.backup-{secrets.token_hex(4)}")
+    temp_path = LIBRARY_PATH.with_name(f".{LIBRARY_PATH.name}.tmp-{secrets.token_hex(4)}")
+    had_original = LIBRARY_PATH.exists()
+    try:
+        if had_original:
+            shutil.copy2(LIBRARY_PATH, backup_path)
+        text = "window.AR_LIBRARY = " + json.dumps(library, ensure_ascii=False, indent=2) + ";\n"
+        temp_path.write_text("(function () {\n  " + text.replace("\n", "\n  ").rstrip() + "\n})();\n", encoding="utf-8")
+        shutil.move(str(temp_path), str(LIBRARY_PATH))
+        read_library_js()
+    except Exception:
+        if had_original and backup_path.exists():
+            shutil.copy2(backup_path, LIBRARY_PATH)
+        elif not had_original and LIBRARY_PATH.exists():
+            LIBRARY_PATH.unlink()
+        raise
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+        if backup_path.exists():
+            backup_path.unlink()
+
+
+def atomic_write_library_and_targets(library, targets_mind):
+    file_specs = [
+        (TARGETS_MIND_PATH, "binary"),
+        (LIBRARY_PATH, "library"),
+    ]
+    backups = {}
+    temps = {}
+    originals = {}
+    try:
+        for path, _kind in file_specs:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            backups[path] = path.with_name(f".{path.name}.backup-{secrets.token_hex(4)}")
+            temps[path] = path.with_name(f".{path.name}.tmp-{secrets.token_hex(4)}")
+            originals[path] = path.exists()
+            if originals[path]:
+                shutil.copy2(path, backups[path])
+
+        write_uploaded_file(targets_mind, temps[TARGETS_MIND_PATH])
+        if not temps[TARGETS_MIND_PATH].exists() or temps[TARGETS_MIND_PATH].stat().st_size <= 0:
+            raise DeployError("Temporary targets.mind write produced an empty file.")
+
+        text = "window.AR_LIBRARY = " + json.dumps(library, ensure_ascii=False, indent=2) + ";\n"
+        temps[LIBRARY_PATH].write_text("(function () {\n  " + text.replace("\n", "\n  ").rstrip() + "\n})();\n", encoding="utf-8")
+
+        shutil.move(str(temps[TARGETS_MIND_PATH]), str(TARGETS_MIND_PATH))
+        shutil.move(str(temps[LIBRARY_PATH]), str(LIBRARY_PATH))
+        read_library_js()
+    except Exception:
+        for path, _kind in file_specs:
+            backup = backups.get(path)
+            if originals.get(path) and backup and backup.exists():
+                shutil.copy2(backup, path)
+            elif not originals.get(path) and path.exists():
+                path.unlink()
+        raise
+    finally:
+        for temp_path in temps.values():
+            if temp_path.exists():
+                temp_path.unlink()
+        for backup_path in backups.values():
+            if backup_path.exists():
+                backup_path.unlink()
+
+
 def move_target_assets_to_deleted(target):
     deleted_at = utc_now()
     folder_name = f"{target['id']}-{deleted_at.replace(':', '').replace('-', '').replace('Z', 'Z')}"
@@ -1724,6 +2598,8 @@ def move_target_assets_to_deleted(target):
     moved_files = []
 
     for key in ("imagePath", "overlayPath"):
+        if is_remote_url(target.get(key)):
+            continue
         source = resolve_repo_asset_path(target.get(key))
         if not source.exists():
             continue
@@ -1745,6 +2621,26 @@ def move_target_assets_to_deleted(target):
     return moved_files
 
 
+def restore_moved_target_assets(target, moved_files):
+    moved_set = {normalize_repo_path(path) for path in moved_files}
+    for key in ("imagePath", "overlayPath"):
+        if is_remote_url(target.get(key)):
+            continue
+        destination = resolve_repo_asset_path(target.get(key))
+        source = None
+        for repo_path in moved_set:
+            candidate = ROOT / repo_path
+            if candidate.name == destination.name and candidate.exists():
+                source = candidate
+                break
+        if not source:
+            continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            continue
+        shutil.move(str(source), str(destination))
+
+
 def read_deleted_manifest(folder_name):
     folder = resolve_deleted_folder(folder_name)
     manifest_path = folder / "delete-manifest.json"
@@ -1764,6 +2660,8 @@ def read_deleted_manifest(folder_name):
     manifest["deletedPath"] = normalize_repo_path(folder.relative_to(ROOT))
     manifest["imagePath"] = deleted_preview_path(manifest, {".png", ".jpg", ".jpeg", ".webp"})
     manifest["overlayPath"] = deleted_preview_path(manifest, OVERLAY_EXTENSIONS)
+    if not manifest["overlayPath"] and is_remote_url(original_target.get("overlayPath")):
+        manifest["overlayPath"] = original_target.get("overlayPath")
     manifest["expiresAt"] = deleted_expiry(manifest.get("deletedAt"))
     return manifest
 
@@ -1802,6 +2700,8 @@ def restore_target_assets(deleted_manifest):
     planned_moves = []
 
     for key in ("imagePath", "overlayPath"):
+        if is_remote_url(original_target.get(key)):
+            continue
         destination = resolve_repo_asset_path(original_target.get(key))
         source = folder / destination.name
         if not source.exists():

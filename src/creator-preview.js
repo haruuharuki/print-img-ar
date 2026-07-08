@@ -153,8 +153,12 @@
       closeLibraryPanel();
     }
   });
-  window.addEventListener("ar-library-updated", () => {
-    refreshLibraryState();
+  window.addEventListener("ar-library-updated", (event) => {
+    const detail = event.detail || {};
+    const shouldPreservePreview =
+      detail.preserveCreatorPreview &&
+      (!detail.targetId || (activeTarget && detail.targetId === activeTarget.id));
+    refreshLibraryState({ preservePreview: shouldPreservePreview });
     if (!libraryPanel.classList.contains("hidden")) {
       if (libraryMode === "trash") {
         openLibraryTrashPanel();
@@ -265,7 +269,7 @@
     });
 
     const videoPreview = document.createElement("video");
-    videoPreview.src = targetConfig.overlayPath;
+    videoPreview.src = versionedRemoteMediaUrl(targetConfig.overlayPath, targetConfig);
     videoPreview.muted = true;
     videoPreview.controls = true;
     videoPreview.preload = "metadata";
@@ -327,7 +331,7 @@
     image.loading = "lazy";
 
     const videoPreview = document.createElement("video");
-    videoPreview.src = deletedTarget.overlayPath || "";
+    videoPreview.src = versionedRemoteMediaUrl(deletedTarget.overlayPath || "", deletedTarget);
     videoPreview.muted = true;
     videoPreview.controls = true;
     videoPreview.preload = "metadata";
@@ -395,7 +399,7 @@
     libraryPreviewImage.src = targetConfig.imagePath;
     libraryPreviewImage.alt = `${targetConfig.name} target preview`;
     libraryPreviewVideo.pause();
-    libraryPreviewVideo.src = targetConfig.overlayPath;
+    libraryPreviewVideo.src = versionedRemoteMediaUrl(targetConfig.overlayPath, targetConfig);
     libraryPreviewVideo.muted = true;
     libraryPreviewVideo.onerror = () => {
       statusBox.textContent = `This browser could not preview ${fileNameFromPath(targetConfig.overlayPath)}.`;
@@ -411,7 +415,7 @@
     libraryPreviewImage.src = deletedTarget.imagePath || "";
     libraryPreviewImage.alt = `${deletedTarget.targetName || deletedTarget.targetId} deleted target preview`;
     libraryPreviewVideo.pause();
-    libraryPreviewVideo.src = deletedTarget.overlayPath || "";
+    libraryPreviewVideo.src = versionedRemoteMediaUrl(deletedTarget.overlayPath || "", deletedTarget);
     libraryPreviewVideo.muted = true;
     libraryPreviewVideo.onerror = () => {
       statusBox.textContent = `This browser could not preview ${fileNameFromPath(deletedTarget.overlayPath)}.`;
@@ -430,17 +434,18 @@
   }
 
   function editOverlayTarget(targetId) {
-    const targetConfig = getLibraryTargets().find((item) => item.id === targetId);
+    const canonicalTargetId = String(targetId || "");
+    const targetConfig = getLibraryTargets().find((item) => item.id === canonicalTargetId);
     if (targetConfig && !targetConfig.enabled) {
       statusBox.textContent = `${targetConfig.name} is disabled. Enable it before adjusting overlay preview.`;
       return;
     }
     if (window.CreatorProjectSetup && window.CreatorProjectSetup.editTarget) {
-      window.CreatorProjectSetup.editTarget(targetId);
+      window.CreatorProjectSetup.editTarget(canonicalTargetId);
     }
     closeLibraryPanel();
     setActiveTab("adjust");
-    applySelectedTarget(targetId, { showStatus: true });
+    applySelectedTarget(canonicalTargetId, { showStatus: true });
   }
 
   async function deleteLibraryTarget(targetConfig) {
@@ -462,14 +467,16 @@
       return;
     }
 
-    statusBox.textContent = `Deleting ${targetConfig.name} from local library...`;
+    statusBox.textContent = `Preparing delete for ${targetConfig.id}...`;
     try {
       const result = await window.CreatorProjectSetup.deleteTarget(targetConfig.id);
       window.AR_LIBRARY = result.library;
       window.dispatchEvent(new CustomEvent("ar-library-updated"));
       refreshLibraryState();
       renderLibraryPanel();
-      statusBox.textContent = `Deleted ${targetConfig.name}. Files moved to assets/_deleted for 7 days.`;
+      statusBox.textContent = result.r2DeletePending && result.r2DeletePending.pending
+        ? `R2 cleanup pending for ${targetConfig.id}. Deploy deletion to remove ${result.r2DeletePending.objectKeys.length} R2 object(s).`
+        : `Deleted ${targetConfig.name}. Files moved to assets/_deleted for 7 days.`;
     } catch (error) {
       console.error(error);
       statusBox.textContent = `Delete failed for ${targetConfig.name}: ${error.message}`;
@@ -569,7 +576,7 @@
     }
   }
 
-  function refreshLibraryState() {
+  function refreshLibraryState({ preservePreview = false } = {}) {
     const currentTargetId = activeTarget && activeTarget.id;
     enabledTargets = getEnabledTargets(window.AR_LIBRARY);
     const refreshedTarget =
@@ -580,6 +587,13 @@
     populateTargetSelect();
     targetSelect.value = activeTarget.id;
     baseUpdatedAt = activeTarget.updatedAt || "";
+    if (preservePreview) {
+      loadOverlayState(activeTarget);
+      return;
+    }
+    applyVideoConfig(activeTarget);
+    recreateTargetEntity(activeTarget);
+    loadOverlayState(activeTarget);
   }
 
   async function handleTargetFound() {
@@ -616,7 +630,8 @@
   }
 
   async function applySelectedTarget(targetId, { showStatus }) {
-    const nextTarget = enabledTargets.find((item) => item.id === targetId);
+    const canonicalTargetId = String(targetId || "");
+    const nextTarget = enabledTargets.find((item) => item.id === canonicalTargetId);
     if (!nextTarget) return;
 
     const mindarSystem = scene.systems["mindar-image-system"];
@@ -632,6 +647,8 @@
     activeTarget = nextTarget;
     targetSelect.value = activeTarget.id;
     video.pause();
+    video.removeAttribute("src");
+    video.load();
     video.currentTime = 0;
     applyVideoConfig(activeTarget);
     recreateTargetEntity(activeTarget);
@@ -646,10 +663,27 @@
         await video.play();
         video.pause();
         video.currentTime = 0;
+      } catch (error) {
+        console.warn("Creator video unlock during target switch failed", {
+          targetId: activeTarget.id,
+          overlayPath: activeTarget.overlayPath,
+          name: error && error.name,
+          message: error && error.message
+        });
+      }
+
+      try {
         await mindarSystem.start();
       } catch (error) {
-        console.warn("Restart after target switch failed", error);
-        statusBox.textContent = `Switch target failed. Refresh Creator and try ${activeTarget.name} again.`;
+        console.warn("Restart after target switch failed", {
+          targetId: activeTarget.id,
+          targetIndex: activeTarget.targetIndex,
+          imagePath: activeTarget.imagePath,
+          overlayPath: activeTarget.overlayPath,
+          name: error && error.name,
+          message: error && error.message
+        });
+        statusBox.textContent = `Switch target failed. Refresh Creator and try ${activeTarget.id} again.`;
       }
     }
   }
@@ -665,7 +699,7 @@
 
     const nextOverlay = document.createElement("a-video");
     nextOverlay.setAttribute("src", "#creatorArVideo");
-    nextOverlay.setAttribute("material", "transparent: true; alphaTest: 0.01");
+    nextOverlay.setAttribute("material", videoMaterialForTarget(targetConfig));
     nextTarget.append(nextOverlay);
 
     nextTarget.addEventListener("targetFound", handleTargetFound);
@@ -679,7 +713,9 @@
   function applyVideoConfig(targetConfig) {
     const videoConfig = targetConfig.video || {};
     video.pause();
-    video.src = targetConfig.overlayPath;
+    video.removeAttribute("src");
+    video.load();
+    video.src = versionedRemoteMediaUrl(targetConfig.overlayPath, targetConfig);
     video.loop = targetConfig.overlayLoopPath ? false : videoConfig.loop !== undefined ? videoConfig.loop : true;
     video.muted = videoConfig.muted !== undefined ? videoConfig.muted : true;
     video.playsInline = videoConfig.playsInline !== undefined ? videoConfig.playsInline : true;
@@ -690,10 +726,16 @@
     video.load();
   }
 
+  function videoMaterialForTarget(targetConfig) {
+    return targetConfig.overlayMode === "opaque" || targetConfig.overlayBackgroundMode === "opaque"
+      ? "shader: flat; transparent: false"
+      : "transparent: true; alphaTest: 0.01";
+  }
+
   function handlePreviewVideoEnded() {
     if (!activeTarget || !activeTarget.overlayLoopPath) return;
     video.pause();
-    video.src = activeTarget.overlayLoopPath;
+    video.src = versionedRemoteMediaUrl(activeTarget.overlayLoopPath, activeTarget);
     video.loop = true;
     video.toggleAttribute("loop", true);
     video.load();
@@ -706,8 +748,12 @@
     if (!activeTarget || !activeTarget.overlayPath || !activeTarget.overlayLoopPath) return;
     const videoConfig = activeTarget.video || {};
     const desiredLoop = activeTarget.overlayLoopPath ? false : videoConfig.loop !== undefined ? videoConfig.loop : true;
-    if (!isSameVideoSource(video, activeTarget.overlayPath)) {
-      video.src = activeTarget.overlayPath;
+    const introSource = versionedRemoteMediaUrl(activeTarget.overlayPath, activeTarget);
+    if (!isSameVideoSource(video, introSource)) {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+      video.src = introSource;
       video.load();
     }
     video.loop = desiredLoop;
@@ -727,6 +773,25 @@
     } catch (_error) {
       return currentSource === source;
     }
+  }
+
+  function versionedRemoteMediaUrl(url, targetConfig) {
+    if (!isRemoteUrl(url)) return url;
+
+    const version = window.AR_DEPLOY_VERSION || (targetConfig && targetConfig.updatedAt);
+    if (!version) return url;
+
+    try {
+      const parsedUrl = new URL(url);
+      parsedUrl.searchParams.set("v", version);
+      return parsedUrl.href;
+    } catch (_error) {
+      return url;
+    }
+  }
+
+  function isRemoteUrl(url) {
+    return /^https?:\/\//i.test(String(url || ""));
   }
 
   function loadOverlayState(targetConfig) {
@@ -829,7 +894,7 @@
   async function deployOverlayConfig() {
     deployConfigButton.disabled = true;
     saveConfigButton.disabled = true;
-    statusBox.textContent = "Validating library from disk...";
+    statusBox.textContent = "Verifying Cloudflare R2 configuration and library from disk...";
 
     try {
       const payload = getDeployPayload();
@@ -846,7 +911,10 @@
         return;
       }
 
-      statusBox.textContent = "Validating and deploying library... This may take up to 2 minutes.";
+      const hasPendingR2Delete = Boolean(result.r2Status && result.r2Status.pendingR2DeleteRecoveryPaths && result.r2Status.pendingR2DeleteRecoveryPaths.length);
+      statusBox.textContent = hasPendingR2Delete
+        ? "Deploying deletion... This may take up to 2 minutes."
+        : "Deploying library... This may take up to 2 minutes.";
       const deployResult = await requestLibraryDeploy({
         ...payload,
         confirmedFiles: result.filesToDeploy
@@ -856,10 +924,18 @@
         statusBox.textContent = deployResult.message || "Nothing new to deploy.";
         return;
       }
+      statusBox.textContent = hasPendingR2Delete ? "Cleaning R2 objects..." : "Cleaning temporary files...";
       snippetBox.value = buildDeploySuccessReport(deployResult);
-      statusBox.textContent = `Deploy successful: ${deployResult.shortCommitSha} pushed to ${deployResult.remote}.`;
+      statusBox.textContent = deployResult.r2Status && deployResult.r2Status.cleanupComplete
+        ? `Delete complete: ${deployResult.shortCommitSha} pushed to ${deployResult.remote}.`
+        : `R2 cleanup pending: ${deployResult.shortCommitSha} pushed to ${deployResult.remote}.`;
     } catch (error) {
       console.error(error);
+      const details = error.details || {};
+      const recoveryPaths = details.recoveryPaths || (details.recoveryPath ? [details.recoveryPath] : []);
+      if (recoveryPaths.length || details.retrySteps) {
+        snippetBox.value = buildDeployFailureReport(error);
+      }
       statusBox.textContent = error.name === "AbortError"
         ? "Request timed out. Check the helper window and git status before trying again."
         : `Deploy failed: ${error.message}`;
@@ -887,7 +963,9 @@
     const result = await response.json();
 
     if (!response.ok || !result.ok) {
-      throw new Error(result.error || "Prepare deploy failed.");
+      const error = new Error(result.error || "Prepare deploy failed.");
+      error.details = result.details || {};
+      throw error;
     }
     return result;
   }
@@ -908,7 +986,9 @@
       const result = await response.json();
 
       if (!response.ok || !result.ok) {
-        throw new Error(result.error || "Library deploy failed.");
+        const error = new Error(result.error || "Library deploy failed.");
+        error.details = result.details || {};
+        throw error;
       }
       return result;
     } finally {
@@ -943,6 +1023,12 @@
     const lines = [
       result.ready ? "Ready to deploy" : "Not ready to deploy",
       "",
+      `Storage: ${result.storageMode || "Cloudflare R2 - Production"}`,
+      `R2 configured: ${Boolean(result.r2Status && result.r2Status.configured)}`,
+      `R2 verify complete: ${Boolean(result.r2Status && result.r2Status.verifyComplete)}`,
+      `Remote overlays verified: ${result.r2Status ? result.r2Status.remoteOverlayCount : 0}`,
+      `Pending R2 delete recoveries: ${result.r2Status && result.r2Status.pendingR2DeleteRecoveryPaths ? result.r2Status.pendingR2DeleteRecoveryPaths.length : 0}`,
+      "",
       `Targets: ${result.librarySummary.enabledTargets}/${result.librarySummary.totalTargets} enabled`,
       "",
       "Files to deploy:",
@@ -952,7 +1038,13 @@
       ...listLines(result.warnings),
       "",
       "Unrelated working-tree changes:",
-      ...listLines(result.unrelatedChanges)
+      ...listLines(result.unrelatedChanges),
+      "",
+      "Recovery paths:",
+      ...listLines([
+        ...((result.r2Status && result.r2Status.recoveryPaths) || []),
+        ...((result.r2Status && result.r2Status.pendingR2DeleteRecoveryPaths) || [])
+      ])
     ];
 
     if (result.errors && result.errors.length) {
@@ -970,10 +1062,21 @@
       `Pushed to: ${result.remote}`,
       `Targets: ${result.librarySummary.enabledTargets}`,
       `Files deployed: ${result.filesDeployed.length}`,
+      `Cleanup complete: ${Boolean(result.r2Status && result.r2Status.cleanupComplete)}`,
+      `R2 objects deleted: ${result.r2Status && result.r2Status.r2DeleteCleanup ? result.r2Status.r2DeleteCleanup.deletedObjectKeys.length : 0}`,
       "Netlify deployment should begin automatically.",
       "",
       "Files deployed:",
-      ...listLines(result.filesDeployed)
+      ...listLines(result.filesDeployed),
+      "",
+      "Cleaned recovery paths:",
+      ...listLines([
+        ...((result.r2Status && result.r2Status.cleanedRecoveryPaths) || []),
+        ...((result.r2Status && result.r2Status.r2DeleteCleanup && result.r2Status.r2DeleteCleanup.cleanedRecoveryPaths) || [])
+      ]),
+      "",
+      "Pending R2 cleanup paths:",
+      ...listLines(result.r2Status && result.r2Status.r2DeleteCleanup && result.r2Status.r2DeleteCleanup.pendingRecoveryPaths)
     ].join("\n");
   }
 
@@ -984,7 +1087,31 @@
       "Files checked:",
       ...listLines(result.filesDeployed),
       "",
-      `Targets: ${result.librarySummary.enabledTargets}/${result.librarySummary.totalTargets} enabled`
+      `Targets: ${result.librarySummary.enabledTargets}/${result.librarySummary.totalTargets} enabled`,
+      `Cleanup complete: ${Boolean(result.r2Status && result.r2Status.cleanupComplete)}`,
+      "",
+      "Pending R2 cleanup paths:",
+      ...listLines(result.r2Status && result.r2Status.r2DeleteCleanup && result.r2Status.r2DeleteCleanup.pendingRecoveryPaths)
+    ].join("\n");
+  }
+
+  function buildDeployFailureReport(error) {
+    const details = error.details || {};
+    const recoveryPaths = details.recoveryPaths || (details.recoveryPath ? [details.recoveryPath] : []);
+    return [
+      `Deploy failed: ${error.message}`,
+      "",
+      "Recovery paths:",
+      ...listLines(recoveryPaths),
+      "",
+      "Retry steps:",
+      ...listLines(details.retrySteps),
+      "",
+      "Details:",
+      ...listLines(details.errors || details.warnings ? [
+        ...(details.errors || []),
+        ...(details.warnings || [])
+      ] : [])
     ].join("\n");
   }
 
@@ -1023,7 +1150,12 @@
         baseUpdatedAt = savedTarget.updatedAt || "";
         targetSelect.value = activeTarget.id;
       }
-      window.dispatchEvent(new CustomEvent("ar-library-updated"));
+      window.dispatchEvent(new CustomEvent("ar-library-updated", {
+        detail: {
+          preserveCreatorPreview: true,
+          targetId: activeTarget.id
+        }
+      }));
       statusBox.textContent = `Saved overlay for ${activeTarget.name} locally.`;
     } catch (error) {
       console.error(error);

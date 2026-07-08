@@ -7,8 +7,27 @@
 
     <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
-    <script src="./src/ar-config.js"></script>
-    <script src="./src/ar-library.js"></script>
+    <script>
+      window.AR_DEPLOY_VERSION_PROMISE = fetch("./src/ar-deploy-version.js", { cache: "no-store" })
+        .then((response) => response.ok ? response.text() : "")
+        .then((text) => {
+          const match = text.match(/AR_DEPLOY_VERSION\s*=\s*("([^"]+)"|'([^']+)')/);
+          const deployVersion = match ? match[2] || match[3] : window.AR_DEPLOY_VERSION || "dev";
+          window.AR_DEPLOY_VERSION = deployVersion;
+          return deployVersion;
+        })
+        .catch(() => window.AR_DEPLOY_VERSION || "dev");
+
+      window.AR_LOAD_VERSIONED_SCRIPT = function (src, deployVersion) {
+        return new Promise((resolve, reject) => {
+          const script = document.createElement("script");
+          script.src = `${src}?v=${encodeURIComponent(deployVersion)}`;
+          script.onload = resolve;
+          script.onerror = reject;
+          document.head.append(script);
+        });
+      };
+    </script>
 
     <style>
       html,
@@ -510,8 +529,17 @@
       <a-entity id="targetRoot"></a-entity>
     </a-scene>
 
-    <script src="./src/ar-capture.js"></script>
-    <script src="./src/ar-live.js"></script>
-    <script src="./src/ar-viewer.js"></script>
+    <script>
+      (async function () {
+        const deployVersion = await window.AR_DEPLOY_VERSION_PROMISE;
+        await window.AR_LOAD_VERSIONED_SCRIPT("./src/ar-config.js", deployVersion);
+        await window.AR_LOAD_VERSIONED_SCRIPT("./src/ar-library.js", deployVersion);
+        await window.AR_LOAD_VERSIONED_SCRIPT("./src/ar-capture.js", deployVersion);
+        await window.AR_LOAD_VERSIONED_SCRIPT("./src/ar-live.js", deployVersion);
+        await window.AR_LOAD_VERSIONED_SCRIPT("./src/ar-viewer.js", deployVersion);
+      })().catch((error) => {
+        console.error("AR viewer failed to load", error);
+      });
+    </script>
   </body>
 </html>
