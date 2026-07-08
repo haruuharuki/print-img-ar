@@ -1,133 +1,133 @@
 (function () {
   window.AR_LIBRARY = {
-  "version": 1,
-  "maxActiveTargets": 15,
-  "targetFile": "./assets/targets.mind",
-  "targets": [
-    {
-      "id": "vicky",
-      "name": "Vicky",
-      "enabled": true,
-      "targetIndex": 0,
-      "imagePath": "./assets/targets/vicky.png",
-      "overlayPath": "./assets/overlays/vicky.mp4",
-      "overlayBackgroundMode": "auto",
-      "overlayType": "video",
-      "overlay": {
-        "width": 1.006,
-        "height": 1.455,
-        "position": "0 0 0.01",
-        "rotation": "0 0 0"
+    "version": 1,
+    "maxActiveTargets": 15,
+    "targetFile": "./assets/targets.mind",
+    "targets": [
+      {
+        "id": "vicky",
+        "name": "Vicky",
+        "enabled": true,
+        "targetIndex": 0,
+        "imagePath": "./assets/targets/vicky.png",
+        "overlayPath": "./assets/overlays/vicky.mp4",
+        "overlayBackgroundMode": "auto",
+        "overlayType": "video",
+        "overlay": {
+          "width": 1.006,
+          "height": 1.455,
+          "position": "0 0 0.01",
+          "rotation": "0 0 0"
+        },
+        "video": {
+          "autoplay": true,
+          "loop": true,
+          "muted": true,
+          "playsInline": true
+        },
+        "updatedAt": "2026-07-04T00:00:00Z"
       },
-      "video": {
-        "autoplay": true,
-        "loop": true,
-        "muted": true,
-        "playsInline": true
+      {
+        "id": "nuwa",
+        "name": "nuwa",
+        "enabled": true,
+        "targetIndex": 1,
+        "imagePath": "./assets/targets/nuwa.png",
+        "overlayPath": "./assets/overlays/nuwa.webm",
+        "overlayBackgroundMode": "auto",
+        "overlayType": "video",
+        "overlay": {
+          "width": 1.13,
+          "height": 1.647,
+          "position": "0 0 0.01",
+          "rotation": "0 0 0"
+        },
+        "video": {
+          "autoplay": true,
+          "loop": true,
+          "muted": true,
+          "playsInline": true
+        },
+        "updatedAt": "2026-07-06T08:58:27.832Z",
+        "overlayPackedPath": "./assets/overlays/nuwa-packed.mp4",
+        "overlayMode": "auto-alpha"
       },
-      "updatedAt": "2026-07-04T00:00:00Z"
-    },
-    {
-      "id": "nuwa",
-      "name": "nuwa",
-      "enabled": true,
-      "targetIndex": 1,
-      "imagePath": "./assets/targets/nuwa.png",
-      "overlayPath": "./assets/overlays/nuwa.webm",
-      "overlayBackgroundMode": "auto",
-      "overlayType": "video",
-      "overlay": {
-        "width": 1.13,
-        "height": 1.647,
-        "position": "0 0 0.01",
-        "rotation": "0 0 0"
+      {
+        "id": "lignice",
+        "name": "Lignice",
+        "enabled": true,
+        "targetIndex": 2,
+        "imagePath": "./assets/targets/lignice.png",
+        "overlayPath": "https://pub-91ea9853cab9485495948b49cc3f67a3.r2.dev/overlays/lignice/pose-01/lignice.webm",
+        "overlayBackgroundMode": "auto",
+        "overlayType": "video",
+        "overlay": {
+          "width": 1.519,
+          "height": 1.677,
+          "position": "0 0.066 0.01",
+          "rotation": "0 0 0"
+        },
+        "video": {
+          "autoplay": true,
+          "loop": true,
+          "muted": true,
+          "playsInline": true
+        },
+        "updatedAt": "2026-07-07T07:00:57Z",
+        "overlayPackedPath": "https://pub-91ea9853cab9485495948b49cc3f67a3.r2.dev/overlays/lignice/pose-01/lignice-packed.mp4",
+        "overlayMode": "auto-alpha",
+        "overlayLoopPath": "https://pub-91ea9853cab9485495948b49cc3f67a3.r2.dev/overlays/lignice/pose-01/lignice-loop.webm",
+        "overlayLoopPackedPath": "https://pub-91ea9853cab9485495948b49cc3f67a3.r2.dev/overlays/lignice/pose-01/lignice-loop-packed.mp4"
       },
-      "video": {
-        "autoplay": true,
-        "loop": true,
-        "muted": true,
-        "playsInline": true
+      {
+        "id": "luk-jia2",
+        "name": "luk jia2",
+        "enabled": true,
+        "targetIndex": 3,
+        "imagePath": "./assets/targets/luk-jia2.png",
+        "overlayPath": "./assets/overlays/luk-jia2.webm",
+        "overlayBackgroundMode": "auto",
+        "overlayType": "video",
+        "overlay": {
+          "width": 1.006,
+          "height": 1.455,
+          "position": "0 0 0.01",
+          "rotation": "0 0 0"
+        },
+        "video": {
+          "autoplay": true,
+          "loop": true,
+          "muted": true,
+          "playsInline": true
+        },
+        "updatedAt": "2026-07-07T08:53:27.989Z",
+        "overlayPackedPath": "./assets/overlays/luk-jia2-packed.mp4",
+        "overlayMode": "auto-alpha"
       },
-      "updatedAt": "2026-07-06T08:58:27.832Z",
-      "overlayPackedPath": "./assets/overlays/nuwa-packed.mp4",
-      "overlayMode": "auto-alpha"
-    },
-    {
-      "id": "lignice",
-      "name": "Lignice",
-      "enabled": true,
-      "targetIndex": 2,
-      "imagePath": "./assets/targets/lignice.png",
-      "overlayPath": "https://pub-91ea9853cab9485495948b49cc3f67a3.r2.dev/overlays/lignice/pose-01/lignice.webm",
-      "overlayBackgroundMode": "auto",
-      "overlayType": "video",
-      "overlay": {
-        "width": 1.519,
-        "height": 1.677,
-        "position": "0 0.066 0.01",
-        "rotation": "0 0 0"
-      },
-      "video": {
-        "autoplay": true,
-        "loop": true,
-        "muted": true,
-        "playsInline": true
-      },
-      "updatedAt": "2026-07-07T07:00:57Z",
-      "overlayPackedPath": "https://pub-91ea9853cab9485495948b49cc3f67a3.r2.dev/overlays/lignice/pose-01/lignice-packed.mp4",
-      "overlayMode": "auto-alpha",
-      "overlayLoopPath": "https://pub-91ea9853cab9485495948b49cc3f67a3.r2.dev/overlays/lignice/pose-01/lignice-loop.webm",
-      "overlayLoopPackedPath": "https://pub-91ea9853cab9485495948b49cc3f67a3.r2.dev/overlays/lignice/pose-01/lignice-loop-packed.mp4"
-    },
-    {
-      "id": "luk-jia2",
-      "name": "luk jia2",
-      "enabled": true,
-      "targetIndex": 3,
-      "imagePath": "./assets/targets/luk-jia2.png",
-      "overlayPath": "./assets/overlays/luk-jia2.webm",
-      "overlayBackgroundMode": "auto",
-      "overlayType": "video",
-      "overlay": {
-        "width": 1.006,
-        "height": 1.455,
-        "position": "0 0 0.01",
-        "rotation": "0 0 0"
-      },
-      "video": {
-        "autoplay": true,
-        "loop": true,
-        "muted": true,
-        "playsInline": true
-      },
-      "updatedAt": "2026-07-07T08:53:27.989Z",
-      "overlayPackedPath": "./assets/overlays/luk-jia2-packed.mp4",
-      "overlayMode": "auto-alpha"
-    },
-    {
-      "id": "r2-fail-test-01",
-      "name": "r2-fail-test-01",
-      "enabled": true,
-      "targetIndex": 4,
-      "imagePath": "./assets/targets/r2-fail-test-01.png",
-      "overlayPath": "https://pub-91ea9853cab9485495948b49cc3f67a3.r2.dev/overlays/r2-fail-test-01/pose-01/main-af1ad17bf62324d5cf3d2997f2f99a7eea21356c90817cc1f98016aa318b61ce.mp4",
-      "overlayBackgroundMode": "auto",
-      "overlayType": "video",
-      "overlay": {
-        "width": 1.6,
-        "height": 1.707,
-        "position": "0 0 0.01",
-        "rotation": "0 0 0"
-      },
-      "video": {
-        "autoplay": true,
-        "loop": true,
-        "muted": true,
-        "playsInline": true
-      },
-      "updatedAt": "2026-07-08T03:36:42Z",
-      "overlayMode": "opaque"
-    }
-  ]
-};
+      {
+        "id": "nak-bod",
+        "name": "nak bod",
+        "enabled": true,
+        "targetIndex": 4,
+        "imagePath": "./assets/targets/nak-bod.png",
+        "overlayPath": "https://pub-91ea9853cab9485495948b49cc3f67a3.r2.dev/overlays/nak-bod/pose-01/main-53272fd168720bed07d552facf4b0989c3e0a6d07792a29d8d6c14ba74af2689.mp4",
+        "overlayBackgroundMode": "auto",
+        "overlayType": "video",
+        "overlay": {
+          "width": 1.006,
+          "height": 1.455,
+          "position": "0 0 0.01",
+          "rotation": "0 0 0"
+        },
+        "video": {
+          "autoplay": true,
+          "loop": true,
+          "muted": true,
+          "playsInline": true
+        },
+        "updatedAt": "2026-07-08T04:10:50Z",
+        "overlayMode": "opaque"
+      }
+    ]
+  };
 })();
