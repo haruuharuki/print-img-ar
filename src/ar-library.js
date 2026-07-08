@@ -11,6 +11,7 @@
       "targetIndex": 0,
       "imagePath": "./assets/targets/vicky.png",
       "overlayPath": "./assets/overlays/vicky.mp4",
+      "overlayBackgroundMode": "auto",
       "overlayType": "video",
       "overlay": {
         "width": 1.006,
@@ -33,6 +34,7 @@
       "targetIndex": 1,
       "imagePath": "./assets/targets/nuwa.png",
       "overlayPath": "./assets/overlays/nuwa.webm",
+      "overlayBackgroundMode": "auto",
       "overlayType": "video",
       "overlay": {
         "width": 1.13,
@@ -57,6 +59,7 @@
       "targetIndex": 2,
       "imagePath": "./assets/targets/lignice.png",
       "overlayPath": "https://pub-91ea9853cab9485495948b49cc3f67a3.r2.dev/overlays/lignice/pose-01/lignice.webm",
+      "overlayBackgroundMode": "auto",
       "overlayType": "video",
       "overlay": {
         "width": 1.519,
@@ -83,6 +86,7 @@
       "targetIndex": 3,
       "imagePath": "./assets/targets/luk-jia2.png",
       "overlayPath": "./assets/overlays/luk-jia2.webm",
+      "overlayBackgroundMode": "auto",
       "overlayType": "video",
       "overlay": {
         "width": 1.006,
@@ -99,6 +103,30 @@
       "updatedAt": "2026-07-07T08:53:27.989Z",
       "overlayPackedPath": "./assets/overlays/luk-jia2-packed.mp4",
       "overlayMode": "auto-alpha"
+    },
+    {
+      "id": "r2-fail-test-01",
+      "name": "r2-fail-test-01",
+      "enabled": true,
+      "targetIndex": 4,
+      "imagePath": "./assets/targets/r2-fail-test-01.png",
+      "overlayPath": "https://pub-91ea9853cab9485495948b49cc3f67a3.r2.dev/overlays/r2-fail-test-01/pose-01/main-af1ad17bf62324d5cf3d2997f2f99a7eea21356c90817cc1f98016aa318b61ce.mp4",
+      "overlayBackgroundMode": "auto",
+      "overlayType": "video",
+      "overlay": {
+        "width": 1.6,
+        "height": 1.707,
+        "position": "0 0 0.01",
+        "rotation": "0 0 0"
+      },
+      "video": {
+        "autoplay": true,
+        "loop": true,
+        "muted": true,
+        "playsInline": true
+      },
+      "updatedAt": "2026-07-08T03:36:42Z",
+      "overlayMode": "opaque"
     }
   ]
 };
