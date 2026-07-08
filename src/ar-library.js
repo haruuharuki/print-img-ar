@@ -114,7 +114,7 @@
       "overlayBackgroundMode": "transparent",
       "overlayType": "video",
       "overlay": {
-        "width": 1.11,
+        "width": 1.029,
         "height": 1.496,
         "position": "0 0 0.01",
         "rotation": "0 0 0"
@@ -125,7 +125,7 @@
         "muted": true,
         "playsInline": true
       },
-      "updatedAt": "2026-07-08T07:37:21Z",
+      "updatedAt": "2026-07-08T08:04:23Z",
       "overlayPackedPath": "https://pub-91ea9853cab9485495948b49cc3f67a3.r2.dev/overlays/hasina/pose-01/main-packed-1497ffd23a981d689b38d0be3d7bcbed0709d6bf293a2d6da47f46e5b157c0e8.mp4",
       "overlayMode": "auto-alpha"
     }
