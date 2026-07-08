@@ -114,8 +114,8 @@
       "overlayBackgroundMode": "auto",
       "overlayType": "video",
       "overlay": {
-        "width": 1.555,
-        "height": 1.455,
+        "width": 1.195,
+        "height": 0.792,
         "position": "0 0 0.01",
         "rotation": "0 0 0"
       },
@@ -125,7 +125,7 @@
         "muted": true,
         "playsInline": true
       },
-      "updatedAt": "2026-07-08T04:19:54Z",
+      "updatedAt": "2026-07-08T06:18:22Z",
       "overlayMode": "opaque"
     }
   ]
